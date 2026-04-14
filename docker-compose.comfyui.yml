@@ -1,0 +1,52 @@
+# ComfyUI — image generation backend using FLUX.1-schnell
+#
+# Deploy to: ai-stack-420 (shares GPU with Ollama)
+# Place at: /opt/comfyui/docker-compose.yml
+#
+# Start: docker compose up -d
+# Access UI (for manual use): http://ai-stack-420:8188
+# Odin API: http://localhost:8188/prompt
+#
+# First-run model download (~12GB) happens automatically via the entrypoint script.
+# See scripts/comfyui-first-run.sh for details.
+
+services:
+  comfyui:
+    image: yanwk/comfyui-boot:cu124-slim
+    container_name: comfyui
+    restart: unless-stopped
+    ports:
+      - "8188:8188"
+    volumes:
+      - ./models:/root/ComfyUI/models
+      - ./output:/root/ComfyUI/output
+      - ./custom_nodes:/root/ComfyUI/custom_nodes
+      - ./input:/root/ComfyUI/input
+    environment:
+      - CLI_ARGS=--listen 0.0.0.0 --port 8188 --lowvram
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+# IMPORTANT VRAM note:
+# FLUX.1-schnell fp8 uses ~12GB. Your gemma4:26b uses ~16GB.
+# These cannot coexist on a 24GB 3090.
+#
+# The image_gen tool in /opt/Odin/tools/image_gen.py handles this by:
+#   1. Calling ollama to unload gemma4:26b before queuing a FLUX job
+#   2. Waiting for the FLUX job to complete
+#   3. Letting Ollama reload gemma4:26b on the next request
+#
+# llama3.2:3b (~3GB) and qwen3:4b (~4GB) CAN coexist with FLUX.
+#
+# Set OLLAMA_KEEP_ALIVE=30s in the Ollama container env to make unload
+# behavior fast and predictable.

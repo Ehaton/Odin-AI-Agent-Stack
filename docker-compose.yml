@@ -1,0 +1,62 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  whisper:
+    image: rhasspy/wyoming-whisper:latest
+    container_name: whisper
+    restart: unless-stopped
+    ports:
+      - "10300:10300"
+    volumes:
+      - whisper-data:/data
+    command: >
+      --model large-v3
+      --language en
+      --device cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  piper:
+    image: rhasspy/wyoming-piper:latest
+    container_name: piper
+    restart: unless-stopped
+    ports:
+      - "10200:10200"
+    volumes:
+      - piper-data:/data
+    command: >
+      --voice en_US-lessac-high
+
+  openwakeword:
+    image: rhasspy/wyoming-openwakeword:latest
+    container_name: wakeword
+    restart: unless-stopped
+    ports:
+      - "10400:10400"
+    command: >
+      --preload-model hey_odin
+      --threshold 0.5
+
+volumes:
+  ollama-data:
+  whisper-data:
+  piper-data:

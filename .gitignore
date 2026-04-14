@@ -1,0 +1,105 @@
+# ─── Secrets & credentials ─────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.crt
+*.p12
+*.pfx
+Odin.pub
+credentials.json
+secrets.yml
+secrets.yaml
+auth.json
+*_token*
+*_secret*
+*api_key*
+scan-secrets.sh
+
+# ─── Runtime state & databases ─────────────────────────────────────
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+odin.db
+odin.log
+*.log
+logs/
+
+# ─── Python ────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ─── BeanLab personal data (not for public repo) ───────────────────
+obsidian_vault/
+generated_images/
+conversations/
+chat_history/
+references/
+scratch/
+tmp/
+temp/
+hosts.json
+
+# Ignore all of Odins_Self EXCEPT the prompts directory.
+# The prompts are part of the project; everything else is conversation
+# state, memory dumps, and personal scratchpad.
+Odins_Self/*
+!Odins_Self/prompts/
+!Odins_Self/prompts/**
+
+# ─── IDE & editor ──────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ─── Built artifacts ───────────────────────────────────────────────
+*.built.Modelfile
+
+# ─── Third-party clones (if you put the awesome-prompts repo locally) ─
+awesome-ai-system-prompts/
+
+# ─── OS junk ───────────────────────────────────────────────────────
+.directory
+desktop.ini
+# Explicit SSH key protection — catches keys without standard extensions
+/Odin
+/Odin.pub
+ssh_keys/
+
+# Local Ollama Modelfile snapshots — reference local blob paths, not portable
+Odins_Self/prompts/baseline/

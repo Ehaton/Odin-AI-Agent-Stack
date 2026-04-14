@@ -1,0 +1,13 @@
+FROM gemma4:26b
+
+PARAMETER temperature 0.5
+PARAMETER top_p 0.9
+PARAMETER num_ctx 32768
+PARAMETER repeat_penalty 1.05
+
+# The SYSTEM directive is populated at build time by build-odin-models.sh.
+# For manual builds, replace this SYSTEM block with the contents of odin-reasoner.system.md.
+
+SYSTEM """
+[REPLACE WITH CONTENTS OF odin-reasoner.system.md]
+"""
