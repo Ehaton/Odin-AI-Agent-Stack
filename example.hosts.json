@@ -1,0 +1,17 @@
+{
+  "HOSTNAME": {
+    "host": "YOUR_IP_HERE",
+    "user": "YOUR_USER_HERE",
+    "description": "DESCRIPTION_HERE"
+  },
+  "HOSTNAME": {
+    "host": "YOUR_IP_HERE",
+    "user": "YOUR_USER_HERE",
+    "description": "DESCRIPTION_HERE"
+  },
+  "HOSTNAME": {
+    "host": "YOUR_IP_HERE",
+    "user": "YOUR_USER_HERE",
+    "description": "DESCRIPTION_HERE"
+  }
+}
