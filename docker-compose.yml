@@ -3,10 +3,15 @@ services:
     image: ollama/ollama:latest
     container_name: ollama
     restart: unless-stopped
+    networks:
+      - ai-net
     ports:
       - "11434:11434"
     volumes:
       - ollama-data:/root/.ollama
+    environment:
+      - OLLAMA_KEEP_ALIVE=10m
+      - OLLAMA_MAX_LOADED_MODELS=2
     deploy:
       resources:
         reservations:
@@ -19,26 +24,25 @@ services:
     image: rhasspy/wyoming-whisper:latest
     container_name: whisper
     restart: unless-stopped
+    networks:
+      - ai-net
     ports:
       - "10300:10300"
     volumes:
       - whisper-data:/data
     command: >
-      --model large-v3
+      --model medium
       --language en
-      --device cuda
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+      --device cpu
+    # Whisper runs on CPU (medium model) to free full 24GB VRAM for
+    # qwen3.6:27b. Upgrade to large-v3 + cuda if adding a second GPU.
 
   piper:
     image: rhasspy/wyoming-piper:latest
     container_name: piper
     restart: unless-stopped
+    networks:
+      - ai-net
     ports:
       - "10200:10200"
     volumes:
@@ -50,13 +54,197 @@ services:
     image: rhasspy/wyoming-openwakeword:latest
     container_name: wakeword
     restart: unless-stopped
+    networks:
+      - ai-net
     ports:
       - "10400:10400"
     command: >
       --preload-model hey_odin
       --threshold 0.5
 
+  odin:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: beanlab/odin:latest
+    container_name: odin
+    restart: unless-stopped
+    networks:
+      - ai-net
+    ports:
+      - "5050:5050"
+    volumes:
+      # Persistent data
+      - odin-db:/app/odin.db
+      - odin-logs:/app/odin.log
+      - odin-images:/app/generated_images
+      # Obsidian vault (SMB/NFS mount on host)
+      - /mnt/obsidian_vault:/mnt/obsidian_vault:ro
+      # SSH keys — mount from host so Odin can SSH to BeanLab hosts
+      - /home/cfiaschetti/.ssh:/home/odin/.ssh:ro
+    environment:
+      # ─── Auth ───────────────────────────────────────────────
+      - ODIN_USER=${ODIN_USER}
+      - ODIN_PASS=${ODIN_PASS}
+      # ─── Ollama — use container name, not localhost ──────────
+      - OLLAMA_HOST=http://ollama:11434
+      # ─── Vault ──────────────────────────────────────────────
+      - ODIN_VAULT_PATH=/mnt/obsidian_vault/obsidian_vault/Odin/Odin
+      - OBSIDIAN_URL=${OBSIDIAN_URL}
+      - OBSIDIAN_API_KEY=${OBSIDIAN_API_KEY}
+      # ─── Database & config ───────────────────────────────────
+      - ODIN_PORT=5050
+      - ODIN_DB=/app/odin.db
+      - ODIN_HOSTS_FILE=/app/hosts.json
+      - ODIN_IMAGE_DIR=/app/generated_images
+      # ─── Tailscale HTTPS ────────────────────────────────────
+      - TAILNET_NAME=${TAILNET_NAME}
+      # ─── Home Assistant ─────────────────────────────────────
+      - HASS_URL=${HASS_URL}
+      - HASS_TOKEN=${HASS_TOKEN}
+      # ─── Proxmox API ─────────────────────────────────────────
+      - PVE_TOKEN_ID=${PVE_TOKEN_ID}
+      - PVE_TOKEN_SECRET=${PVE_TOKEN_SECRET}
+      # ─── ComfyUI & SearXNG ──────────────────────────────────
+      - COMFYUI_URL=http://comfyui:8188
+      - SEARXNG_URL=http://searxng:8080
+      # ─── ChromaDB ───────────────────────────────────────────
+      - CHROMA_TOKEN=${CHROMA_TOKEN}
+    depends_on:
+      - ollama
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    restart: unless-stopped
+    networks:
+      - ai-net
+    ports:
+      - "3000:8080"
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-change-this-to-something-random}
+      - ENABLE_IMAGE_GENERATION=True
+      - IMAGE_GENERATION_ENGINE=comfyui
+      - COMFYUI_BASE_URL=http://comfyui:8188
+      - ENABLE_RAG_WEB_SEARCH=True
+      - RAG_WEB_SEARCH_ENGINE=searxng
+      - SEARXNG_QUERY_URL=http://searxng:8080/search?q=<query>
+      - AUDIO_STT_ENGINE=whisper
+      - WHISPER_MODEL=medium
+      - AUDIO_TTS_ENGINE=openai
+      - AUDIO_TTS_OPENAI_API_BASE_URL=http://piper:10200
+      - AUDIO_TTS_OPENAI_API_KEY=unused
+      - VECTOR_DB=chroma
+      - CHROMA_HTTP_HOST=chromadb
+      - CHROMA_HTTP_PORT=8000
+    volumes:
+      - open-webui-data:/app/backend/data
+    depends_on:
+      - ollama
+      - comfyui
+      - searxng
+      - chromadb
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+
+  comfyui:
+    image: pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime
+    container_name: comfyui
+    restart: unless-stopped
+    networks:
+      - ai-net
+    ports:
+      - "8188:8188"
+    volumes:
+      - comfyui-data:/workspace
+    working_dir: /workspace
+    entrypoint: /bin/bash
+    command: >
+      -c "
+      if [ ! -d /workspace/ComfyUI ]; then
+        apt-get update && apt-get install -y git;
+        git clone https://github.com/comfyanonymous/ComfyUI.git /workspace/ComfyUI;
+        pip install -r /workspace/ComfyUI/requirements.txt;
+      fi;
+      cd /workspace/ComfyUI && python main.py --listen 0.0.0.0 --port 8188
+      "
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  searxng:
+    image: docker.io/searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    networks:
+      - ai-net
+    ports:
+      - "8080:8080"
+    volumes:
+      - /opt/Odin/searxng:/etc/searxng:rw
+    environment:
+      - SEARXNG_BASE_URL=http://192.168.1.111:8080/
+      - UWSGI_WORKERS=4
+      - UWSGI_THREADS=4
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: chromadb
+    restart: unless-stopped
+    networks:
+      - ai-net
+    ports:
+      - "8000:8000"
+    volumes:
+      - chromadb-data:/chroma/chroma
+    environment:
+      - IS_PERSISTENT=TRUE
+      - ANONYMIZED_TELEMETRY=FALSE
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   ollama-data:
   whisper-data:
   piper-data:
+  open-webui-data:
+  searxng-data:
+  chromadb-data:
+  comfyui-data:
+  odin-db:
+  odin-logs:
+  odin-images:
+
+networks:
+  ai-net:

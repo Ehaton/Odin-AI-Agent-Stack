@@ -1,0 +1,118 @@
+# ============================================================================
+# Odin Model Registry — BeanLab April 2026
+# ============================================================================
+# Edit this file to swap models or tune routing without touching Odin.py.
+# Changes take effect on next startup, or POST /api/models/reload to hot-swap.
+#
+# Role assignments control the auto-routing behavior.
+# The web UI's model picker shows all entries under `models:` below.
+# ============================================================================
+
+# ─── Active role assignments ────────────────────────────────────────────────
+roles:
+  worker: qwen3.6:27b          # Deep reasoning, synthesis, vision, complex infra
+  coder: qwen3-fast:4b              # Code generation, simple infra, fast tool calls
+  voice: llama3.1:8b           # HA voice control — fast, focused, spoken output
+  vision: qwen3.6:27b          # Vision tasks (qwen3.6 is natively multimodal)
+  router: qwen3:4b             # Legacy alias — heuristic routing is default
+  reasoning: qwen3.6:27b       # Legacy alias
+  general: qwen3.6:27b         # Safe fallback
+  code: qwen3:4b               # Legacy alias
+
+# ─── Routing thresholds ─────────────────────────────────────────────────────
+routing:
+  complex_host_threshold: 2    # Host mentions that escalate coder→worker
+  complex_word_threshold: 30   # Word count that escalates code queries to worker
+  voice_max_words: 15          # Max words for HA voice routing
+  simple_infra_max_words: 15   # Max words for single-host infra on coder
+
+# ─── Default vision model ───────────────────────────────────────────────────
+default_vision_model: qwen3.6:27b
+
+# ─── Model catalog ──────────────────────────────────────────────────────────
+models:
+  # ─── Auto (smart routing) ────────────────────────────────────────────────
+  auto:
+    label: "Auto"
+    description: "Let Odin choose the best model based on your query."
+    supports_tools: true
+    supports_vision: true
+    disable_thinking: false
+    num_ctx: 16384
+    temperature: 0.7
+    top_p: 0.9
+    prewarm: false
+    role_hints: [auto]
+
+  # ─── Primary: Qwen 3.6 27B — Worker / Reasoner / Vision ─────────────────
+  qwen3.6:27b:
+    label: "Qwen 3.6 27B"
+    description: "Primary reasoning model. Deep analysis, complex infra, vision, and coding at scale. 27B parameters, native image input."
+    supports_tools: true
+    supports_vision: true
+    disable_thinking: false
+    num_ctx: 16384
+    temperature: 0.7
+    top_p: 0.9
+    prewarm: true
+    role_hints: [worker, vision, reasoning]
+
+  # ─── Fast: Qwen 3 4B — Coder / Router ────────────────────────────────────
+  qwen3:4b:
+    label: "Qwen 3 4B"
+    description: "Fast executor. Code generation, simple infra queries, single-host SSH tasks. Tool-calling capable."
+    supports_tools: true
+    supports_vision: false
+    disable_thinking: true        # Strip <think> blocks for speed
+    num_ctx: 8192
+    temperature: 0.3
+    top_p: 0.9
+    prewarm: true
+    role_hints: [coder, router, fast]
+
+  # ─── Voice: Llama 3.1 8B ─────────────────────────────────────────────────
+  llama3.1:8b:
+    label: "Llama 3.1 8B"
+    description: "Voice and quick-chat model. Fast responses, short output, HA control. Optimized for spoken delivery."
+    supports_tools: true
+    supports_vision: false
+    disable_thinking: false
+    num_ctx: 8192
+    temperature: 0.5
+    top_p: 0.9
+    prewarm: false                # Load on demand — voice isn't always active
+    role_hints: [voice, chat]
+
+  qwen3-fast:4b:
+    label: "Qwen 3 4B (No Think)"
+    description: "qwen3:4b with thinking permanently disabled via Modelfile. Fast executor for infra and code."
+    supports_tools: true
+    supports_vision: false
+    disable_thinking: true
+    num_ctx: 8192
+    temperature: 0.3
+    top_p: 0.9
+    prewarm: true
+    role_hints: [coder, router, fast]
+# ─── Category-to-role mapping ───────────────────────────────────────────────
+categories:
+  voice: voice           # HA commands
+  trivial: voice         # Greetings, one-liners
+  code: coder            # Code generation/debugging
+  infra_simple: coder    # Short single-host infra queries
+  home: worker           # Non-HA home planning
+  infra: worker          # Complex multi-host coordination
+  reasoning: worker      # Analysis, synthesis, planning
+  general: worker        # Safe fallback
+
+# ─── n8n integration ────────────────────────────────────────────────────────
+n8n:
+  enabled: true
+  webhook_base_url: "http://192.168.1.219:5678"
+  workflows:
+    morning_flow: "/webhook/morning-flow"
+    homelab_scan: "/webhook/homelab-scan"
+    weekly_backup: "/webhook/weekly-backup"
+    weekly_updates: "/webhook/weekly-updates"
+    media_scan: "/webhook/media-duplicate-scan"
+    jellybean_check: "/webhook/jellybean-accessibility"

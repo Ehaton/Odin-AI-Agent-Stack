@@ -103,3 +103,11 @@ ssh_keys/
 
 # Local Ollama Modelfile snapshots — reference local blob paths, not portable
 Odins_Self/prompts/baseline/
+odin.db
+odin.log
+*.db-shm
+*.db-wal
+overnight_test_*/
+quick_test_*/
+generated_images/*
+searxng/

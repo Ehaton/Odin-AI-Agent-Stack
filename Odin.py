@@ -80,6 +80,18 @@ try:
 except ImportError:
     HAS_SSH = False
 
+# Dynamic model registry — loaded from models.yaml on startup.
+# Edit models.yaml to add/remove/tune models without touching this file.
+try:
+    from model_registry import registry
+except ImportError as e:
+    print("Failed to load model_registry. Is models.yaml present and pyyaml installed?")
+    print(f"  {e}")
+    print("  pip install pyyaml")
+    sys.exit(1)
+
+_odin_start_time = time.time()
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -94,117 +106,24 @@ DB_PATH = os.environ.get("ODIN_DB", "odin.db")
 HOSTS_FILE = os.environ.get("ODIN_HOSTS_FILE", "hosts.json")
 PURGE_AFTER_DAYS = 7
 
-MODELS = {
-    # Role-based routing for a 3-model setup on a single RTX 3090 (24GB).
-    # Total VRAM: ~24GB weights + cache, right at the ceiling.
-    #
-    # As of April 2026 this uses Modelfile variants (odin-*:v1) that bake
-    # role-specific system prompts into the model tags. The base models
-    # (gemma4:26b, qwen3:4b, llama3.2:3b) remain available as the FROM
-    # source for each variant and for the voice role (see note below).
-    #
-    # qwen3:4b is the big win in this lineup: it supports tool calling
-    # natively (unlike qwen2.5-coder), it's tiny enough to stay hot, and
-    # with thinking disabled it's fast enough to route. It serves double
-    # duty as both the code specialist AND the secondary tool-calling worker
-    # for routine queries that don't need Gemma's full power.
-    #
-    # Thinking is DISABLED on qwen3:4b — benchmark evidence shows thinking
-    # mode on the 4B variant burns ~63s/prompt for the same accuracy as the
-    # 0.6B variant at 3.6s. Don't leave it on.
-    #
-    # The voice role intentionally stays on base llama3.2:3b: Meta trained
-    # 3.2 for on-device tool calling (HA intents), which is the opposite
-    # behavior of odin-router:v1 (a strict JSON classifier). Using the
-    # router variant here would break Home Assistant commands.
-    "worker":    "odin-reasoner:v1",   # gemma4:26b + synthesis/vision/reasoner persona
-    "coder":     "odin-executor:v1",   # qwen3:4b + tool-chain agent persona
-    "voice":     "llama3.2:3b",         # Base — Meta's native HA tool calling
-    "vision":    "odin-reasoner:v1",   # odin-reasoner inherits gemma4:26b's vision
-    # Legacy aliases — all resolve to valid tags
-    "router":    "odin-executor:v1",
-    "reasoning": "odin-reasoner:v1",
-    "general":   "odin-reasoner:v1",
-    "code":      "odin-executor:v1",
-}
-
-# User-facing model metadata for the picker dropdown. Each entry drives both
-# the UI and per-model inference parameters (context size, thinking mode).
-MODEL_INFO = {
-    "auto": {
-        "label": "Auto (smart routing)",
-        "description": "Routes based on query type: code/simple tools → Odin Executor (qwen3:4b), home control → Llama 3.2 3B, complex/vision → Odin Reasoner (gemma4:26b).",
-        "supports_tools": True,
-        "supports_vision": False,
-    },
-    # ─── Modelfile variants (active by default under auto routing) ──────
-    "odin-reasoner:v1": {
-        "label": "Odin Reasoner",
-        "description": "gemma4:26b + synthesis/vision persona prompt. Complex reasoning, multi-host coordination, vault synthesis, and vision. 6K context to fit alongside the two smaller models on a 24GB 3090.",
-        "supports_tools": True,
-        "supports_vision": True,
-        "disable_thinking": False,
-        "num_ctx": 6144,
-    },
-    "odin-executor:v1": {
-        "label": "Odin Executor",
-        "description": "qwen3:4b + tool-chain agent persona. Code questions, simple infra tool calls, and multi-step execution. Thinking disabled.",
-        "supports_tools": True,
-        "supports_vision": False,
-        "disable_thinking": True,
-        "num_ctx": 8192,
-    },
-    "odin-router:v1": {
-        "label": "Odin Router (JSON classifier)",
-        "description": "llama3.2:3b + strict JSON classifier prompt. Not used by the heuristic classify() function but available for manual invocation or future LLM-based routing.",
-        "supports_tools": False,
-        "supports_vision": False,
-        "disable_thinking": False,
-        "num_ctx": 2048,
-    },
-    # ─── Base models (still selectable for manual override) ─────────────
-    "llama3.2:3b": {
-        "label": "Llama 3.2 3B (Voice)",
-        "description": "Tiny, fast model for Home Assistant voice intent. Meta specifically trained 3.2 for on-device tool calling including home control. Sub-second responses, always hot. Scope is limited to HA tools — cannot SSH or access the vault.",
-        "supports_tools": True,
-        "supports_vision": False,
-        "disable_thinking": False,
-        "num_ctx": 4096,
-    },
-    "gemma4:26b": {
-        "label": "Gemma 4 26B (base)",
-        "description": "Base Gemma 4 model without the Odin persona prompt. MoE architecture (26B total, 4B active). Used as FROM source for odin-reasoner:v1.",
-        "supports_tools": True,
-        "supports_vision": True,
-        "disable_thinking": False,
-        "num_ctx": 6144,
-    },
-    "qwen3:4b": {
-        "label": "Qwen 3 4B (base)",
-        "description": "Base Qwen 3 4B without the Odin persona prompt. Small, fast, strong tool calling. Thinking is DISABLED. Used as FROM source for odin-executor:v1.",
-        "supports_tools": True,
-        "supports_vision": False,
-        "disable_thinking": True,
-        "num_ctx": 8192,
-    },
-}
-
-# Default vision model used when auto-routing images. The reasoner variant
-# inherits gemma4:26b's multimodal capability along with the synthesis persona.
-DEFAULT_VISION_MODEL = "odin-reasoner:v1"
-
-# Category-to-role mapping used by classify(). The classifier returns a
-# category string; that gets looked up here to decide which model role runs.
-CATEGORIES = {
-    "voice":        "voice",   # HA voice commands → llama3.2:3b
-    "trivial":      "voice",   # Greetings etc. → llama3.2:3b (it's the smallest hot model)
-    "code":         "coder",   # Code questions → qwen3:4b (has tools, fast)
-    "infra_simple": "coder",   # Short single-host queries → qwen3:4b
-    "home":         "worker",  # Non-HA home planning → gemma4:26b
-    "infra":        "worker",  # Complex/multi-host infra → gemma4:26b
-    "reasoning":    "worker",  # Why/how/explain/synthesize → gemma4:26b
-    "general":      "worker",  # Catch-all → gemma4:26b (safe fallback)
-}
+# ---------------------------------------------------------------------------
+# Model Configuration — loaded from models.yaml
+# ---------------------------------------------------------------------------
+# All model definitions, role assignments, and routing thresholds live in
+# models.yaml. Edit that file to swap models or tune routing without
+# touching this code. Use `python model_registry.py` to validate the YAML.
+#
+# - MODELS:              role → Ollama model tag (used by classify() and UI)
+# - MODEL_INFO:          model tag → metadata dict (UI picker + inference params)
+# - CATEGORIES:          classify() category → role
+# - DEFAULT_VISION_MODEL: the tag used when auto-routing images
+# - _ROUTING:            heuristic thresholds used by classify()
+#
+MODELS = registry.roles
+MODEL_INFO = registry.models
+CATEGORIES = registry.categories
+DEFAULT_VISION_MODEL = registry.default_vision_model
+_ROUTING = registry.routing
 
 def _load_ssh_hosts():
     """Load SSH host definitions from a JSON file. Returns empty dict if not found."""
@@ -1198,11 +1117,18 @@ def call_llm(model, messages, tools=None, max_tokens=2048, temperature=0.7,
             "arguments": args,
         })
 
-    # Strip any leaked <think> blocks. With think=false they shouldn't appear,
-    # but belt-and-suspenders — some model/template combos leak them anyway.
+    # Strip thinking artifacts. Three sources of leakage:
+    #   1. Ollama native `thinking` field — separate from content, discard
+    #   2. <think>...</think> tags leaked into content — strip with regex
+    #   3. Raw thought paragraphs before answer (qwen3 partial suppression)
     content = msg.get("content") or ""
+    # Remove <think> blocks (tagged form)
     if "<think>" in content:
         content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+    # Strip Ollama native thinking field if it leaked into content
+    thinking_field = msg.get("thinking") or ""
+    if thinking_field and content.startswith(thinking_field[:80].strip()):
+        content = content[len(thinking_field):].strip()
 
     return {
         "content": content,
@@ -1252,7 +1178,7 @@ def classify(text, client):
     )
     has_ha_verb = any(v in lower for v in ha_verbs)
     has_ha_noun = any(n in lower.split() or n + "s" in lower.split() for n in ha_nouns)
-    if word_count <= 15 and has_ha_verb and has_ha_noun:
+    if word_count <= _ROUTING["voice_max_words"] and has_ha_verb and has_ha_noun:
         return "voice"
 
     # ─── 2. Code or simple infra (qwen3:4b handles both) ─────────────
@@ -1278,14 +1204,17 @@ def classify(text, client):
     )
     has_complex = any(s in f" {lower} " for s in complex_signals)
 
-    # Route code queries to qwen3:4b — BUT escalate to Gemma if:
-    #   - 2+ hosts involved (needs coordination Gemma handles better)
+    # Route code queries to the coder — BUT escalate to worker if:
+    #   - complex_host_threshold+ hosts involved
     #   - complex synthesis verbs present
-    #   - query is very long (>30 words usually means complex requirements)
+    #   - query exceeds complex_word_threshold words
+    # Thresholds are configurable via models.yaml → routing section.
     if has_code:
-        if host_mentions >= 2 or has_complex or word_count > 30:
-            return "reasoning"  # → gemma4:26b
-        return "code"  # → qwen3:4b
+        if (host_mentions >= _ROUTING["complex_host_threshold"]
+                or has_complex
+                or word_count > _ROUTING["complex_word_threshold"]):
+            return "reasoning"  # → worker
+        return "code"  # → coder
 
     # ─── 3. Simple infra without code keywords ───────────────────────
     # Short, single-host queries like "check uptime on ai-stack-420" can
@@ -1444,10 +1373,16 @@ YOUR JOB: Handle code questions and simple infrastructure tasks quickly.
 
 CAPABILITIES: SSH, local shell, vault search, web fetch, Home Assistant.
 
+CRITICAL — OUTPUT FORMAT:
+- Output ONLY your final answer. No preamble, no reasoning, no "let me think".
+- Do NOT explain your thought process. Do NOT narrate what you are doing.
+- Start your response with the answer itself. Never with "Okay", "First", "Let me", "I need to".
+- If you catch yourself writing a reasoning paragraph — stop and delete it. Write only the result.
+
 RULES:
 1. For code questions — answer directly. Write code that works. Use Markdown fences like ```python.
-2. For "check X on host Y" queries — use run_ssh with the right host alias.
-3. Make ONE or TWO tool calls maximum. If the problem needs more than that, say so and the user will escalate.
+2. For "check X on host Y" queries — use run_ssh with the right host alias, then report the result in one line.
+3. Make ONE or TWO tool calls maximum. If the problem needs more, say so and escalate.
 4. Never repeat the same tool call with the same arguments.
 5. If a tool errors, try ONE alternative — do not loop.
 6. Keep responses concise. You're the fast path, not the deep path.
@@ -1464,10 +1399,16 @@ You are helpful, sharp, and efficient. Address the user as "sir" occasionally. D
 Always respond in English.
 Current time: {now}
 
+CRITICAL — OUTPUT FORMAT:
+- Output ONLY your final answer. No preamble, no internal reasoning, no narration.
+- Do NOT write "Okay, let me...", "First, I need to...", "I should...", or any thought process.
+- Start your response directly with the information or action. Never with meta-commentary.
+- If you catch yourself writing a reasoning paragraph — stop and delete it. Answer directly.
+
 CAPABILITIES: vault search/read/write, local shell, SSH to remote machines, web fetch, Home Assistant control, public IP lookup.
 
 AVAILABLE SSH HOSTS:
-{hosts}
+{{hosts}}
 
 RULES:
 1. For homelab questions — search the vault FIRST.
@@ -1476,7 +1417,7 @@ RULES:
 4. Destructive commands are blocked automatically. Explain what you wanted to do.
 5. Maximum 4 tool calls per response.
 6. Keep responses concise — you may be speaking out loud.
-7. NEVER repeat a tool call with the same arguments. If a tool returns empty or errors, either try DIFFERENT arguments or answer with what you have.
+7. NEVER repeat a tool call with the same arguments. If a tool returns empty or errors, try DIFFERENT arguments or answer with what you have.
 8. If you've gathered partial information, answer with what you have rather than retrying.
 9. Summarize web content — never dump raw HTML.
 10. FORMATTING: Respond in plain text or Markdown only. NEVER emit HTML tags (no <code>, <br>, <strong>, etc.). Use `backticks` for inline code and ```fences``` for code blocks.
@@ -1911,6 +1852,39 @@ def list_models():
         items.append({"id": key, "available": ok, **info})
     return jsonify({"models": items})
 
+
+@app.route("/api/models/reload", methods=["POST"])
+def reload_models():
+    """Reload models.yaml without restarting Odin.
+
+    Updates MODELS, MODEL_INFO, CATEGORIES, DEFAULT_VISION_MODEL, and the
+    routing thresholds in place. Prewarming doesn't re-run — restart for that.
+
+    Returns the new role assignments so a client can verify.
+    """
+    global MODELS, MODEL_INFO, CATEGORIES, DEFAULT_VISION_MODEL, _ROUTING
+    try:
+        registry.reload()
+        MODELS = registry.roles
+        MODEL_INFO = registry.models
+        CATEGORIES = registry.categories
+        DEFAULT_VISION_MODEL = registry.default_vision_model
+        _ROUTING = registry.routing
+        logger.log("models_reloaded",
+                   roles=MODELS,
+                   model_count=len(MODEL_INFO) - 1)  # -1 for the "auto" pseudo-entry
+        return jsonify({
+            "ok": True,
+            "roles": MODELS,
+            "default_vision_model": DEFAULT_VISION_MODEL,
+            "routing": _ROUTING,
+            "model_count": len(MODEL_INFO) - 1,
+        })
+    except Exception as e:
+        logger.log("models_reload_failed", error=str(e))
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/upload", methods=["POST"])
 def upload():
     """Accept a file and return extracted text content (for use as attachment)."""
@@ -1992,6 +1966,271 @@ def logs():
         events = [e for e in events if e.get("chat_id") == chat_id]
     return jsonify({"events": events})
 
+"""
+ODIN COMMAND CENTER — NEW API ENDPOINTS
+========================================
+ 
+Add these routes to Odin.py after the existing /api/logs route (~line 1946).
+ 
+These provide the data feeds for the Command Center UI:
+  - /api/hosts/status   — live ping + port check for all hosts
+  - /api/hosts/<alias>/metrics — CPU, RAM, disk for a specific host via SSH
+  - /api/telemetry      — aggregated metrics for the dashboard widgets
+  - /api/session        — current session state (active tools, recent actions)
+"""
+@app.route("/cc")
+def command_center():
+    with open(os.path.join(os.path.dirname(__file__), "static", "odin-ui.html")) as f:
+        return f.read()
+ 
+# ─── Host status with live ping ──────────────────────────────────────────
+@app.route("/api/hosts/status")
+def hosts_status():
+    """Return all hosts with live reachability status.
+ 
+    Pings each host in parallel and checks key ports. Results are cached
+    for 30 seconds to avoid hammering the network on rapid UI polls.
+    """
+    import socket as _sock
+ 
+    def _check_host(alias, info):
+        ip = _resolve_host_ip(info)
+        # Quick ping — 1 packet, 2s timeout
+        try:
+            r = subprocess.run(
+                ["ping", "-c", "1", "-W", "2", ip],
+                capture_output=True, text=True, timeout=5
+            )
+            reachable = r.returncode == 0
+            latency = None
+            if reachable:
+                for line in r.stdout.split("\n"):
+                    if "time=" in line:
+                        try:
+                            latency = float(line.split("time=")[1].split(" ")[0].replace("ms", ""))
+                        except (ValueError, IndexError):
+                            pass
+                        break
+        except Exception:
+            reachable = False
+            latency = None
+ 
+        # Quick port check on first configured port (if description mentions one)
+        port_status = None
+        # We don't have ports in hosts.json, so just check SSH (22)
+        try:
+            s = _sock.create_connection((ip, 22), timeout=2)
+            s.close()
+            port_status = "open"
+        except Exception:
+            port_status = "closed"
+ 
+        return {
+            "alias": alias,
+            "ip": ip,
+            "user": info.get("user", ""),
+            "description": info.get("description", ""),
+            "reachable": reachable,
+            "latency_ms": latency,
+            "ssh_port": port_status,
+        }
+ 
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = {pool.submit(_check_host, a, i): a for a, i in SSH_HOSTS.items()}
+        results = []
+        for f in as_completed(futures):
+            try:
+                results.append(f.result())
+            except Exception as e:
+                alias = futures[f]
+                results.append({"alias": alias, "reachable": False, "error": str(e)})
+ 
+    # Sort by alias for consistent ordering
+    results.sort(key=lambda r: r["alias"])
+    online = sum(1 for r in results if r.get("reachable"))
+ 
+    return jsonify({
+        "hosts": results,
+        "total": len(results),
+        "online": online,
+        "offline": len(results) - online,
+        "timestamp": datetime.datetime.now(MST).isoformat(),
+    })
+ 
+ 
+# ─── Per-host metrics via SSH ────────────────────────────────────────────
+@app.route("/api/hosts/<alias>/metrics")
+def host_metrics(alias):
+    """Fetch CPU, RAM, disk, and uptime from a host via SSH."""
+    if alias not in SSH_HOSTS:
+        return jsonify({"error": f"Unknown host: {alias}"}), 404
+ 
+    # One-liner that outputs JSON-ish stats
+    cmd = (
+        "echo '{';"
+        "echo '\"cpu_percent\"':$(top -bn1 | grep 'Cpu(s)' | awk '{print 100-$8}');"
+        "echo ',\"ram_total_mb\"':$(free -m | awk '/Mem:/{print $2}');"
+        "echo ',\"ram_used_mb\"':$(free -m | awk '/Mem:/{print $3}');"
+        "echo ',\"ram_percent\"':$(free | awk '/Mem:/{printf \"%.1f\", $3/$2*100}');"
+        "echo ',\"disk_percent\"':$(df / | awk 'NR==2{gsub(/%/,\"\",$5); print $5}');"
+        "echo ',\"disk_total_gb\"':$(df -BG / | awk 'NR==2{gsub(/G/,\"\",$2); print $2}');"
+        "echo ',\"disk_used_gb\"':$(df -BG / | awk 'NR==2{gsub(/G/,\"\",$3); print $3}');"
+        "echo ',\"uptime\"':\"'\"$(uptime -p)\"'\";"
+        "echo ',\"load_1m\"':$(cat /proc/loadavg | awk '{print $1}');"
+        "echo ',\"load_5m\"':$(cat /proc/loadavg | awk '{print $2}');"
+        "echo ',\"load_15m\"':$(cat /proc/loadavg | awk '{print $3}');"
+        "echo '}'"
+    )
+ 
+    result = shell.run_ssh(alias, cmd, timeout=10)
+    if "error" in result:
+        return jsonify({"error": result["error"], "alias": alias}), 500
+ 
+    # Parse the rough JSON output
+    import re as _re
+    raw = result.get("stdout", "")
+    try:
+        # Clean up the output — it's not perfect JSON
+        cleaned = _re.sub(r"(\w+):", r'"\1":', raw.replace("'", '"'))
+        data = json.loads(cleaned)
+    except Exception:
+        # Fall back to raw output
+        data = {"raw": raw.strip()}
+ 
+    data["alias"] = alias
+    data["ip"] = _resolve_host_ip(SSH_HOSTS[alias])
+    data["timestamp"] = datetime.datetime.now(MST).isoformat()
+ 
+    return jsonify(data)
+ 
+ 
+# ─── Aggregated telemetry (polled by dashboard) ─────────────────────────
+@app.route("/api/telemetry")
+def telemetry():
+    """Quick telemetry for the local machine (ai-stack-420).
+ 
+    Uses /proc directly — no SSH needed since we're on the host.
+    Falls back gracefully if psutil isn't available.
+    """
+    data = {
+        "timestamp": datetime.datetime.now(MST).isoformat(),
+        "hostname": "ai-stack-420",
+    }
+ 
+    # CPU
+    try:
+        with open("/proc/loadavg") as f:
+            parts = f.read().split()
+            data["load_1m"] = float(parts[0])
+            data["load_5m"] = float(parts[1])
+            data["load_15m"] = float(parts[2])
+    except Exception:
+        pass
+ 
+    # Memory
+    try:
+        with open("/proc/meminfo") as f:
+            meminfo = {}
+            for line in f:
+                key, val = line.split(":")
+                meminfo[key.strip()] = int(val.strip().split()[0])
+            total = meminfo.get("MemTotal", 1)
+            available = meminfo.get("MemAvailable", 0)
+            data["ram_total_mb"] = total // 1024
+            data["ram_used_mb"] = (total - available) // 1024
+            data["ram_percent"] = round((1 - available / total) * 100, 1)
+    except Exception:
+        pass
+ 
+    # Disk
+    try:
+        r = subprocess.run(["df", "/", "--output=size,used,pcent"],
+                           capture_output=True, text=True, timeout=5)
+        lines = r.stdout.strip().split("\n")
+        if len(lines) >= 2:
+            parts = lines[1].split()
+            data["disk_total_gb"] = round(int(parts[0]) / 1024 / 1024, 1)
+            data["disk_used_gb"] = round(int(parts[1]) / 1024 / 1024, 1)
+            data["disk_percent"] = int(parts[2].replace("%", ""))
+    except Exception:
+        pass
+ 
+    # GPU (nvidia-smi)
+    try:
+        r = subprocess.run(
+            ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5
+        )
+        if r.returncode == 0:
+            parts = [p.strip() for p in r.stdout.strip().split(",")]
+            data["gpu_util_percent"] = int(parts[0])
+            data["gpu_vram_used_mb"] = int(parts[1])
+            data["gpu_vram_total_mb"] = int(parts[2])
+            data["gpu_temp_c"] = int(parts[3])
+    except Exception:
+        pass
+ 
+    # Ollama models currently loaded
+    try:
+        r = req.get(f"{OLLAMA_HOST}/api/ps", timeout=3)
+        if r.ok:
+            running = r.json().get("models", [])
+            data["ollama_loaded"] = [
+                {"name": m.get("name"), "size_mb": m.get("size", 0) // 1_000_000}
+                for m in running
+            ]
+    except Exception:
+        pass
+ 
+    return jsonify(data)
+ 
+ 
+# ─── Session state (active context for the sidebar) ────────────────────
+@app.route("/api/session")
+def session_state():
+    """Return current session context for the Command Center sidebar."""
+    # Active SSH connections
+    active_ssh = []
+    for alias in shell.ssh_clients:
+        try:
+            transport = shell.ssh_clients[alias].get_transport()
+            if transport and transport.is_active():
+                active_ssh.append(alias)
+        except Exception:
+            pass
+ 
+    # Recent tool usage from logger
+    recent_tools = []
+    for event in logger.recent(n=50):
+        if event.get("type") == "tool_call":
+            recent_tools.append({
+                "tool": event.get("tool"),
+                "ts": event.get("ts"),
+                "host": event.get("host", ""),
+            })
+ 
+    # Vault status
+    vault_status = {
+        "connected": vault.connected if vault else False,
+        "type": "filesystem" if isinstance(vault, FileSystemVault) else "rest_api" if vault else "none",
+    }
+ 
+    # HA status
+    ha_status = {
+        "connected": ha.connected if ha else False,
+        "url": HASS_URL if ha and ha.connected else None,
+    }
+ 
+    return jsonify({
+        "active_ssh": active_ssh,
+        "recent_tools": recent_tools[-10:],  # Last 10
+        "vault": vault_status,
+        "home_assistant": ha_status,
+        "host_count": len(SSH_HOSTS),
+        "chat_count": len(db.list_chats()),
+        "uptime_seconds": int(time.time() - _odin_start_time),
+    })
 
 # ---------------------------------------------------------------------------
 # HTML/CSS/JS — The Jarvis UI
@@ -3111,12 +3350,36 @@ let activeMessages = []; // Messages for the currently-open chat, fetched from s
 // Client-only UI state: which project groups are expanded
 let projectOpen = JSON.parse(localStorage.getItem('odin_proj_open') || '{}');
 
-const MODELS = [
-  { id: 'auto',         label: 'Auto',          badge: 'smart'  },
-  { id: 'gemma4:26b',   label: 'Gemma 4 26B',   badge: 'worker' },
-  { id: 'qwen3:4b',     label: 'Qwen 3 4B',     badge: 'fast'   },
-  { id: 'llama3.2:3b',  label: 'Llama 3.2 3B',  badge: 'voice'  },
+// MODELS populated dynamically from /api/models on init.
+// Edit models.yaml — no JS changes needed to update the dropdown.
+let MODELS = [
+  { id: 'auto', label: 'Auto', badge: 'smart' },
 ];
+
+async function loadModelList() {
+  try {
+    const d = await api('/api/models');
+    const serverModels = (d.models || []).filter(m => m.available !== false);
+    MODELS = [{ id: 'auto', label: 'Auto', badge: 'smart' }].concat(
+      serverModels
+        .filter(m => m.id !== 'auto')
+        .map(m => ({
+          id: m.id,
+          label: m.label || m.id,
+          badge: (m.role_hints && m.role_hints[0]) || 'model',
+          available: m.available !== false,
+        }))
+    );
+    buildModelDropdown();
+    const saved = MODELS.find(m => m.id === currentModel);
+    if (saved) document.getElementById('modelLabel').textContent = saved.label;
+    else document.getElementById('modelLabel').textContent = 'Auto';
+  } catch (e) {
+    console.warn('Could not load model list from server:', e);
+    // Fall back to just Auto
+    buildModelDropdown();
+  }
+}
 
 const EMOJIS = ['💬','⚡','🔬','🏗️','🤖','🧠','🛡️','🌐','📊','🎯','🔧','📁'];
 
@@ -3124,10 +3387,8 @@ const EMOJIS = ['💬','⚡','🔬','🏗️','🤖','🧠','🛡️','🌐','�
 //  INIT
 // ═══════════════════════════════════════════════
 async function init() {
-  buildModelDropdown();
-  // Restore saved model selection
-  const savedModel = MODELS.find(m => m.id === currentModel);
-  if (savedModel) document.getElementById('modelLabel').textContent = savedModel.label;
+  // Load models dynamically from server, then build dropdown
+  await loadModelList();
 
   setupScrollWatcher();
   setVolume(ttsVolume);
@@ -4129,17 +4390,19 @@ def main():
         available = []
         print("  ⚠️  Ollama not reachable")
 
-    # Prewarm all resident models so the first user query doesn't pay
-    # cold-load latency. Deduped because some roles share a model tag.
-    # Skips tags that aren't actually pulled locally.
-    warm_targets = []
-    for role in ("worker", "coder", "voice"):
-        tag = MODELS.get(role)
-        if tag and tag in available and tag not in warm_targets:
-            warm_targets.append(tag)
+    # Prewarm models tagged `prewarm: true` in models.yaml.
+    # Skips tags that aren't actually pulled locally so missing models
+    # don't block startup — a warning is printed instead.
+    warm_targets = [tag for tag in registry.prewarm_targets() if tag in available]
+    missing_warm = [tag for tag in registry.prewarm_targets() if tag not in available]
+    if missing_warm:
+        print(f"  ⚠️  Prewarm targets not found locally: {', '.join(missing_warm)}")
+        print(f"     Pull or build them, or unset prewarm: true in models.yaml")
     if warm_targets:
         print(f"  🔥 Prewarming: {', '.join(warm_targets)} (in background)")
         prewarm_models(warm_targets, OLLAMA_HOST)
+    else:
+        print(f"  ⚠️  No prewarm targets available — first request will be cold")
 
     if VAULT_PATH:
         vault = FileSystemVault(VAULT_PATH)
