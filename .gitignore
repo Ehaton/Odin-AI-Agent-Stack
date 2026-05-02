@@ -111,3 +111,10 @@ overnight_test_*/
 quick_test_*/
 generated_images/*
 searxng/
+Dockerfile
+deploy.sh
+# Deprecated test scripts
+*_stress*.sh
+*_test*.sh
+quick_test.sh
+cleanup-and-push.sh
