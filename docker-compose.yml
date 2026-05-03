@@ -64,62 +64,6 @@ services:
       --preload-model hey_odin
       --threshold 0.5
 
-  odin:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: beanlab/odin:latest
-    container_name: odin
-    restart: unless-stopped
-    networks:
-      - ai-net
-    ports:
-      - "5050:5050"
-    volumes:
-      # Persistent data
-      - odin-db:/app/odin.db
-      - odin-logs:/app/odin.log
-      - odin-images:/app/generated_images
-      # Obsidian vault (SMB/NFS mount on host)
-      - /mnt/obsidian_vault:/mnt/obsidian_vault:ro
-      # SSH keys — mount from host so Odin can SSH to BeanLab hosts
-      - /home/cfiaschetti/.ssh:/home/odin/.ssh:ro
-    environment:
-      # ─── Auth ───────────────────────────────────────────────
-      - ODIN_USER=${ODIN_USER}
-      - ODIN_PASS=${ODIN_PASS}
-      # ─── Ollama — use container name, not localhost ──────────
-      - OLLAMA_HOST=http://ollama:11434
-      # ─── Vault ──────────────────────────────────────────────
-      - ODIN_VAULT_PATH=/mnt/obsidian_vault/obsidian_vault/Odin/Odin
-      - OBSIDIAN_URL=${OBSIDIAN_URL}
-      - OBSIDIAN_API_KEY=${OBSIDIAN_API_KEY}
-      # ─── Database & config ───────────────────────────────────
-      - ODIN_PORT=5050
-      - ODIN_DB=/app/odin.db
-      - ODIN_HOSTS_FILE=/app/hosts.json
-      - ODIN_IMAGE_DIR=/app/generated_images
-      # ─── Tailscale HTTPS ────────────────────────────────────
-      - TAILNET_NAME=${TAILNET_NAME}
-      # ─── Home Assistant ─────────────────────────────────────
-      - HASS_URL=${HASS_URL}
-      - HASS_TOKEN=${HASS_TOKEN}
-      # ─── Proxmox API ─────────────────────────────────────────
-      - PVE_TOKEN_ID=${PVE_TOKEN_ID}
-      - PVE_TOKEN_SECRET=${PVE_TOKEN_SECRET}
-      # ─── ComfyUI & SearXNG ──────────────────────────────────
-      - COMFYUI_URL=http://comfyui:8188
-      - SEARXNG_URL=http://searxng:8080
-      # ─── ChromaDB ───────────────────────────────────────────
-      - CHROMA_TOKEN=${CHROMA_TOKEN}
-    depends_on:
-      - ollama
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
     container_name: open-webui
@@ -236,6 +180,32 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  n8n:
+    image: docker.n8n.io/n8nio/n8n
+    container_name: n8n
+    restart: unless-stopped
+    networks:
+      - ai-net
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=${N8N_PROTOCOL}
+      - N8N_HOST=${N8N_HOST}
+      - WEBHOOK_URL=${WEBHOOK_URL}
+      - NODE_ENV=production
+      - GENERIC_TIMEZONE=America/Denver
+      - TZ=America/Denver
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./local-files:/files
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   ollama-data:
   whisper-data:
@@ -247,6 +217,6 @@ volumes:
   odin-db:
   odin-logs:
   odin-images:
-
+  n8n_data:
 networks:
   ai-net:

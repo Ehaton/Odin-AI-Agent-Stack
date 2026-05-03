@@ -2006,6 +2006,146 @@ def logs():
 
 
 
+
+# ---------------------------------------------------------------------------
+# HA + Terminal routes (Phase 2)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/ha/states")
+def ha_states():
+    """Proxy HA /api/states so the frontend can render the device grid."""
+    if not ha or not ha.connected:
+        return jsonify({"error": "Home Assistant not configured"}), 503
+    try:
+        r = req.get(
+            f"{ha.url}/api/states",
+            headers=ha.headers,
+            timeout=10,
+        )
+        r.raise_for_status()
+        states = r.json()
+        # Filter to domains the UI cares about; strip noisy attributes
+        DOMAINS = {"light", "switch", "climate", "media_player",
+                   "input_boolean", "automation", "script", "scene", "cover"}
+        filtered = [
+            {
+                "entity_id":  s["entity_id"],
+                "state":      s["state"],
+                "attributes": {
+                    k: v for k, v in s.get("attributes", {}).items()
+                    if k in {"friendly_name", "brightness", "color_temp",
+                              "rgb_color", "temperature", "current_temperature",
+                              "hvac_mode", "volume_level", "media_title",
+                              "icon", "device_class"}
+                },
+                "last_changed": s.get("last_changed"),
+            }
+            for s in states
+            if s["entity_id"].split(".")[0] in DOMAINS
+        ]
+        filtered.sort(key=lambda s: s["entity_id"])
+        return jsonify({"states": filtered})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 502
+
+
+@app.route("/api/ha/call", methods=["POST"])
+def ha_call():
+    """Proxy HA /api/services/<domain>/<service>.
+    Body: {domain, service, entity_id?, brightness?, ...extra service data}
+    """
+    if not ha or not ha.connected:
+        return jsonify({"error": "Home Assistant not configured"}), 503
+    data = request.get_json(silent=True) or {}
+    domain    = str(data.pop("domain", "")).strip()
+    service   = str(data.pop("service", "")).strip()
+    entity_id = data.pop("entity_id", None)
+    if not domain or not service:
+        return jsonify({"error": "domain and service are required"}), 400
+    result = ha.call_service(domain, service, entity_id=entity_id, **data)
+    if "error" in result:
+        return jsonify(result), 502
+    return jsonify(result)
+
+
+@app.route("/api/terminal/connect", methods=["POST"])
+def terminal_connect():
+    """Validate that SSH connectivity to a host works.
+    Body: {host: "<alias from hosts.json>"}
+    Returns: {ok, host_ip, hostname}
+    """
+    data = request.get_json(silent=True) or {}
+    alias = str(data.get("host", "")).strip()
+    if not alias:
+        return jsonify({"error": "host alias required"}), 400
+    if alias not in SSH_HOSTS:
+        return jsonify({"error": f"Unknown host: {alias}. Check hosts.json."}), 404
+    # Run a quick hostname command to verify connectivity
+    result = shell.run_ssh(alias, "hostname", timeout=10)
+    if "error" in result:
+        return jsonify({"error": result["error"]}), 502
+    hostname = (result.get("stdout") or "").strip()
+    info     = SSH_HOSTS[alias]
+    return jsonify({
+        "ok":       True,
+        "alias":    alias,
+        "host_ip":  info.get("host", ""),
+        "hostname": hostname,
+        "user":     info.get("user", ""),
+    })
+
+
+@app.route("/api/terminal/exec", methods=["POST"])
+def terminal_exec():
+    """Execute a shell command on a remote host via SSH.
+    Body: {host: "<alias>", command: "<shell command>"}
+    Returns: {stdout, stderr, returncode}
+
+    Guardrail: same destructive-command block list as the agent tool.
+    """
+    data    = request.get_json(silent=True) or {}
+    alias   = str(data.get("host", "")).strip()
+    command = str(data.get("command", "")).strip()
+
+    if not alias or not command:
+        return jsonify({"error": "host and command are required"}), 400
+    if alias not in SSH_HOSTS:
+        return jsonify({"error": f"Unknown host: {alias}"}), 404
+
+    # Reuse the same destructive-command guard the agent uses
+    BLOCKED_PATTERNS = [
+        "rm -rf /", "rm -rf /*", ":(){ :|:& };", "> /dev/sda",
+        "dd if=/dev/zero", "mkfs", "fdisk", "parted",
+        "shutdown", "reboot", "halt", "poweroff",
+        "passwd", "userdel", "usermod",
+        "chmod -R 777 /", "chown -R",
+        "iptables -F", "ufw disable",
+    ]
+    lower_cmd = command.lower()
+    for blocked in BLOCKED_PATTERNS:
+        if blocked.lower() in lower_cmd:
+            return jsonify({
+                "error": f"Command blocked by Odin safety policy: contains '{blocked}'",
+                "stdout": "",
+                "stderr": "",
+                "returncode": 1,
+            }), 403
+
+    result = shell.run_ssh(alias, command, timeout=30)
+    # run_ssh returns {stdout, stderr, returncode} or {error}
+    if "error" in result and "stdout" not in result:
+        return jsonify({
+            "error":      result["error"],
+            "stdout":     "",
+            "stderr":     "",
+            "returncode": 1,
+        }), 502
+    return jsonify({
+        "stdout":     result.get("stdout", ""),
+        "stderr":     result.get("stderr", ""),
+        "returncode": result.get("returncode", 0),
+    })
+
 # ---------------------------------------------------------------------------
 # Startup
 # ---------------------------------------------------------------------------
