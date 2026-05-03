@@ -1984,7 +1984,10 @@ def list_models():
         available = set()
     items = []
     for key, info in MODEL_INFO.items():
-        ok = key == "auto" or key in available
+        if info.get("provider") == "anthropic":
+            ok = bool(ANTHROPIC_API_KEY)
+        else:
+            ok = key == "auto" or key in available
         items.append({"id": key, "available": ok, **info})
     return jsonify({"models": items})
 
@@ -2232,6 +2235,78 @@ def terminal_exec():
                 "returncode": 1,
             }), 403
 
+    # ── Interactive command substitutions ──────────────────────────────────────
+    # SSH exec_command does not allocate a PTY so interactive full-screen
+    # programs (top, htop, vim, nano) block waiting for terminal input and
+    # return nothing. Substitute them with non-interactive equivalents.
+    INTERACTIVE_SUBS = {
+        "top":          "top -bn1 | head -30",
+        "htop":         "top -bn1 | head -30",
+        "vim":          None,   # no safe substitute — reject
+        "vi":           None,
+        "nano":         None,
+        "less":         None,
+        "more":         None,
+        "man":          None,
+    }
+    base_cmd = command.strip().split()[0].lower() if command.strip() else ""
+    if base_cmd in INTERACTIVE_SUBS:
+        sub = INTERACTIVE_SUBS[base_cmd]
+        if sub is None:
+            return jsonify({
+                "error":      f"'{base_cmd}' requires an interactive terminal (PTY). "
+                              f"Use a non-interactive alternative, e.g. 'cat file' instead of 'nano file'.",
+                "stdout":     "",
+                "stderr":     "",
+                "returncode": 1,
+            }), 400
+        command = sub
+
+    # ── cd handling ────────────────────────────────────────────────────────────
+    # SSH exec_command is stateless — each call opens a new channel with no
+    # shared environment. 'cd /path' produces no output and the directory is
+    # forgotten on the next call.
+    # Solution: prepend the cwd from the request so the command runs in the
+    # right directory. The client tracks cwd and sends it with each request.
+    cwd = str(data.get("cwd") or "").strip()
+
+    # If the command IS a cd, resolve the new path and return it as cwd
+    # without running anything on the host.
+    cd_match = command.strip().split()
+    if cd_match and cd_match[0] == "cd":
+        target = cd_match[1] if len(cd_match) > 1 else "~"
+        if target == "-":
+            # 'cd -' requires shell state we don't have; tell the client
+            return jsonify({
+                "stdout":     "",
+                "stderr":     "cd - not supported in stateless mode. Use an absolute path.",
+                "returncode": 1,
+                "cwd":        cwd,
+            })
+        # Resolve relative paths on the remote host
+        resolve_cmd = f"cd {target} 2>&1 && pwd"
+        if cwd:
+            resolve_cmd = f"cd {cwd} && " + resolve_cmd
+        result = shell.run_ssh(alias, resolve_cmd, timeout=10)
+        if result.get("returncode", 1) != 0 or "error" in result:
+            return jsonify({
+                "stdout":     "",
+                "stderr":     result.get("stdout", result.get("stderr", result.get("error", ""))),
+                "returncode": 1,
+                "cwd":        cwd,
+            })
+        new_cwd = result.get("stdout", "").strip().split("\n")[-1].strip()
+        return jsonify({
+            "stdout":     "",
+            "stderr":     "",
+            "returncode": 0,
+            "cwd":        new_cwd,
+        })
+
+    # Prepend cwd to all other commands
+    if cwd:
+        command = f"cd {cwd} && {command}"
+
     result = shell.run_ssh(alias, command, timeout=30)
     # run_ssh returns {stdout, stderr, returncode} or {error}
     if "error" in result and "stdout" not in result:
@@ -2240,11 +2315,13 @@ def terminal_exec():
             "stdout":     "",
             "stderr":     "",
             "returncode": 1,
+            "cwd":        cwd,
         }), 502
     return jsonify({
         "stdout":     result.get("stdout", ""),
         "stderr":     result.get("stderr", ""),
         "returncode": result.get("returncode", 0),
+        "cwd":        cwd,
     })
 
 # ---------------------------------------------------------------------------
@@ -2328,8 +2405,12 @@ def main():
     # Prewarm models tagged `prewarm: true` in models.yaml.
     # Skips tags that aren't actually pulled locally so missing models
     # don't block startup — a warning is printed instead.
-    warm_targets = [tag for tag in registry.prewarm_targets() if tag in available]
-    missing_warm = [tag for tag in registry.prewarm_targets() if tag not in available]
+    # Skip cloud models (provider: anthropic) — no local weights to load
+    all_prewarm = registry.prewarm_targets()
+    warm_targets = [tag for tag in all_prewarm if tag in available]
+    missing_warm = [tag for tag in all_prewarm
+                    if tag not in available
+                    and MODEL_INFO.get(tag, {}).get("provider") != "anthropic"]
     if missing_warm:
         print(f"  ⚠️  Prewarm targets not found locally: {', '.join(missing_warm)}")
         print(f"     Pull or build them, or unset prewarm: true in models.yaml")
@@ -2366,6 +2447,10 @@ def main():
 
     print(f"  🔑 SSH hosts: {len(SSH_HOSTS)}")
     print(f"  🌐 Web access: enabled")
+    if ANTHROPIC_API_KEY:
+        print(f"  ☁️  Claude API: enabled (model: claude-sonnet-4-6-20250514, cap: {ANTHROPIC_MAX_TOKENS} tokens/call)")
+    else:
+        print(f"  ☁️  Claude API: not configured (add ANTHROPIC_API_KEY to .env to enable)")
     print()
 
     # Get local IP for display

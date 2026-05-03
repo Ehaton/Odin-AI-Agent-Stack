@@ -8,123 +8,105 @@
 # No Modelfile rebuilds needed; prompts are injected at runtime.
 # ============================================================================
 
-# ─── Active role assignments ────────────────────────────────────────────────
-roles:
-  worker: qwen3-coder:30b              # Reasoning, synthesis, complex infra, vision-fallback
-  coder: qwen3-coder:30b        # MoE code agent. 30B total, 3.3B active. Primary workhorse.
-  voice: llama3.2:3b            # HA voice control — Meta's native tool calling
-  vision: qwen3-coder:30b              # Vision tasks (fallback — upgrade when VL model fits)
-  # Legacy aliases — all resolve to valid tags
-  router: qwen3:8b
-  reasoning: qwen3:8b
-  general: qwen3:8b
-  code: qwen3-coder:30b
-
-# ─── Routing thresholds ─────────────────────────────────────────────────────
+# ── Routing thresholds ───────────────────────────────────────────────────────
 routing:
-  complex_host_threshold: 2     # Host mentions that escalate coder→worker
-  complex_word_threshold: 30    # Word count that escalates code queries to worker
-  voice_max_words: 15           # Max words for HA voice routing
-  simple_infra_max_words: 15    # Max words for single-host infra on coder
+  voice_max_words:        12    # queries under this word count qualify for voice routing
+  simple_infra_max_words: 15    # short infra checks route to the fast local model
+  complex_host_threshold:  3    # 3+ host mentions → escalate to worker
+  complex_word_threshold:  60   # long queries → escalate to worker
 
-# ─── Default vision model ───────────────────────────────────────────────────
-default_vision_model: qwen3-coder:30b
+# ── Role → model mapping ─────────────────────────────────────────────────────
+# These are the roles the classifier assigns. Edit the model tag to swap.
+roles:
+  worker: qwen3-coder:30b    # complex reasoning, multi-host coordination
+  coder:  qwen3-coder:30b    # code generation, script writing, SSH tool chains
+  voice:  llama3.2:3b        # HA commands, voice queries, trivial chat
+  vision: qwen3-coder:30b    # image analysis (falls back to coder)
 
-# ─── Model catalog ──────────────────────────────────────────────────────────
+# ── Category → role mapping ──────────────────────────────────────────────────
+categories:
+  code:         coder
+  infra_simple: coder
+  infra:        worker
+  reasoning:    worker
+  home:         worker
+  voice:        voice
+  vision:       vision
+  trivial:      voice
+  general:      worker
+
+# ── Model definitions ────────────────────────────────────────────────────────
+# Each model tag must match exactly what `ollama list` shows.
+# provider: anthropic routes to the Anthropic API instead of Ollama.
+
 models:
-  # ─── Auto (smart routing) ────────────────────────────────────────────────
-  auto:
-    label: "Auto"
-    description: "Let Odin choose the best model based on your query."
-    supports_tools: true
-    supports_vision: false
-    disable_thinking: false
-    num_ctx: 8192
-    temperature: 0.7
-    top_p: 0.9
-    prewarm: false
-    role_hints: [auto]
-
-  # ─── Primary: Qwen3-Coder 30B-A3B (MoE) — Coder ─────────────────────────
-  # 30B total params, 3.3B active per token. Runs at 3B speed, 14B+ quality.
-  # Purpose-built for agentic coding with native tool calling.
-  # Non-thinking mode only (no <think> blocks).
-  # VRAM: ~17 GB at Q4_K_M. Primary hot model.
+  # ── Primary workhorse ───────────────────────────────────────────────────
   qwen3-coder:30b:
     label: "Qwen3 Coder 30B"
-    description: "MoE coding agent. 30B total, 3.3B active per token. Fast inference with 14B+ code quality. Native tool calling, non-thinking."
-    supports_tools: true
-    supports_vision: false
-    disable_thinking: true       # MoE coder is non-thinking by design
-    num_ctx: 8192                # Conservative — leaves VRAM for KV cache
-    temperature: 0.3
-    top_p: 0.8
-    prewarm: true
-    role_hints: [coder, code, fast, tools]
-    timeout: 60
+    description: >
+      MoE architecture: 30B total parameters, ~3.3B active per token.
+      Runs at 3B speed with 14B+ quality. Primary model for all tool-using
+      tasks: SSH, vault, web search, Home Assistant, code generation.
+    supports_tools:   true
+    supports_vision:  false
+    disable_thinking: true      # suppress <think> tokens for speed
+    num_ctx:          8192
+    temperature:      0.6
+    prewarm:          true
+    keep_alive:       10m
+    role_hints:       [coder, worker, infra, reasoning]
+    timeout:          180
 
-  # ─── Reasoner: Qwen3 8B — Worker ─────────────────────────────────────────
-  # Dense 8B model. Strong reasoning, synthesis, planning.
-  # Swaps in when coder isn't needed. ~4.6 GB at Q4_K_M.
-  qwen3:8b:
-    label: "Qwen3 8B"
-    description: "Dense 8B reasoner. Complex analysis, multi-host coordination, synthesis, planning."
-    supports_tools: true
-    supports_vision: false
-    disable_thinking: false
-    num_ctx: 8192
-    temperature: 0.7
-    top_p: 0.9
-    prewarm: false               # Load on demand — coder is the primary hot model
-    role_hints: [worker, reasoning, vision]
-    timeout: 90
-
-  # ─── Voice: Llama 3.2 3B ─────────────────────────────────────────────────
+  # ── Voice / lightweight ──────────────────────────────────────────────────
   llama3.2:3b:
     label: "Llama 3.2 3B"
-    description: "Voice and HA control. Meta's native on-device tool calling. Sub-second responses."
-    supports_tools: true
-    supports_vision: false
+    description: >
+      Meta's native tool-calling 3B model. Fast cold-start (~2.5s),
+      minimal VRAM. Used for voice commands, HA intents, and trivial chat.
+      Keep-alive set to -1 (always warm) for sub-2s voice response.
+    supports_tools:   true
+    supports_vision:  false
     disable_thinking: false
-    num_ctx: 4096
-    temperature: 0.5
-    top_p: 0.9
-    prewarm: false
-    role_hints: [voice, chat]
-    timeout: 30
+    num_ctx:          4096
+    temperature:      0.5
+    prewarm:          true
+    keep_alive:       "-1"      # always warm — critical for voice latency
+    role_hints:       [voice, trivial]
+    timeout:          60
 
-# ─── Category-to-role mapping ───────────────────────────────────────────────
-categories:
-  voice: voice           # HA commands
-  trivial: voice         # Greetings, one-liners
-  code: coder            # Code generation/debugging
-  infra_simple: coder    # Short single-host infra queries
-  home: worker           # Non-HA home planning
-  infra: worker          # Complex multi-host coordination
-  reasoning: worker      # Analysis, synthesis, planning
-  general: worker        # Safe fallback
+  # ── Embeddings ───────────────────────────────────────────────────────────
+  nomic-embed-text:
+    label: "Nomic Embed Text"
+    description: >
+      Text embedding model for vault semantic search via ChromaDB.
+      Not used for chat — only called by the vault_search tool.
+    supports_tools:   false
+    supports_vision:  false
+    disable_thinking: false
+    num_ctx:          2048
+    temperature:      0.0
+    prewarm:          false
+    keep_alive:       5m
+    role_hints:       [embed]
+    timeout:          30
 
-# ─── n8n integration ────────────────────────────────────────────────────────
-n8n:
-  enabled: true
-  webhook_base_url: "http://192.168.1.219:5678"
-  workflows:
-    morning_flow: "/webhook/morning-flow"
-    homelab_scan: "/webhook/homelab-scan"
-    weekly_backup: "/webhook/weekly-backup"
-    weekly_updates: "/webhook/weekly-updates"
-    media_scan: "/webhook/media-duplicate-scan"
-    jellybean_check: "/webhook/jellybean-accessibility"
-
-# ───  Claude integration ────────────────────────────────────────────────────────
-claude-sonnet:
-  label: "Claude Sonnet 4.6"
-  description: "Anthropic cloud model — reasoning and writing"
-  supports_tools: false
-  provider: anthropic
-  api_model: claude-sonnet-4-6-20250514
-  num_ctx: 200000
-  temperature: 0.7
-  prewarm: false
-  role_hints: [cloud, reasoning, writing]
-  timeout: 60
+  # ── Claude Sonnet 4.6 (cloud reasoner) ─────────────────────────────────
+  claude-sonnet:
+    label: "Claude Sonnet 4.6"
+    description: >
+      Anthropic cloud model. Superior reasoning, writing, and synthesis.
+      No tool calls — Claude in this role is pure text reasoning. All SSH,
+      HA, vault, and web search tool calls stay on local qwen3-coder.
+      Requires ANTHROPIC_API_KEY in .env. Tier 2: 1K req/min, no rate limit
+      concerns at single-user homelab scale.
+    supports_tools:   false     # tools always stay local
+    supports_vision:  false
+    disable_thinking: false
+    num_ctx:          200000    # Claude's full context window
+    temperature:      0.7
+    prewarm:          false     # cloud model, no GPU prewarming
+    keep_alive:       null
+    role_hints:       [cloud, reasoning, writing, analysis]
+    timeout:          60
+    provider:         anthropic
+    api_model:        claude-sonnet-4-6-20250514

@@ -590,6 +590,8 @@ a { color: var(--accent); text-decoration: none; }
 .agent-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-dim); flex-shrink: 0; }
 .agent-dot.idle    { background: var(--text-dim); }
 .agent-dot.running { background: var(--success); box-shadow: 0 0 0 3px rgba(109,189,148,0.2); animation: agentPulse 1.5s infinite; }
+.agent-dot.warn    { background: #d9b96b; }
+.agent-dot.standby { background: #c47830; }
 .agent-dot.error   { background: var(--danger); }
 @keyframes agentPulse { 0%,100% { box-shadow: 0 0 0 3px rgba(109,189,148,0.2); } 50% { box-shadow: 0 0 0 5px rgba(109,189,148,0.08); } }
 .agent-name { font-size: 12px; font-weight: 500; color: var(--text); flex: 1; }
@@ -771,22 +773,6 @@ a { color: var(--accent); text-decoration: none; }
     <div class="status-dot" id="statusDot"></div>
 
     <!-- Global tab navigation -->
-    <div class="topbar-tabs">
-      <div class="topbar-tab active" data-view="chat" onclick="switchView('chat')">
-        <svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z"/></svg>
-        Chat
-      </div>
-      <div class="topbar-tab" data-view="agents" onclick="switchView('agents')">
-        <svg viewBox="0 0 24 24"><path d="M12 2a2 2 0 012 2 2 2 0 01-2 2 2 2 0 01-2-2 2 2 0 012-2zm0 6a6 6 0 016 6c0 3.31-2.69 6-6 6s-6-2.69-6-6a6 6 0 016-6z"/></svg>
-        Agents
-      </div>
-      <div class="topbar-tab" data-view="home" onclick="switchView('home')">
-        <svg viewBox="0 0 24 24"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
-        Home Assistant
-      </div>
-    </div>
-
-    <div class="topbar-sep"></div>
 
     <div class="model-selector">
       <div class="model-current" onclick="toggleModelDropdown(event)">
@@ -1694,12 +1680,13 @@ async function loadAgentStatus() {
     // Build agent data from Ollama model status
     const models = d.models_loaded || [];
     agentData = [
-      { id:'coder',    name:'Coder Agent',     role:'qwen3-coder:30b', task: d.active_request ? 'Processing request…' : 'Idle', pct: d.active_request ? 75 : 0, calls: d.total_requests || 0, status: d.active_request ? 'running' : 'idle' },
-      { id:'worker',   name:'Worker Agent',    role:'qwen3-coder:30b', task: 'Standby', pct: 0, calls: 0, status: 'idle' },
-      { id:'voice',    name:'Voice Agent',     role:'llama3.2:3b',     task: 'Listening', pct: 0, calls: 0, status: 'idle' },
-      { id:'vault',    name:'Vault Agent',     role:'nomic-embed',     task: d.vault_notes ? `${d.vault_notes} notes` : 'Ready', pct: 0, calls: 0, status: 'idle' },
-      { id:'ha',       name:'HA Agent',        role:'home-assistant',  task: d.ha_connected ? 'Connected' : 'Disconnected', pct: 0, calls: 0, status: d.ha_connected ? 'idle' : 'error' },
-      { id:'search',   name:'Search Agent',    role:'searxng',         task: 'SearXNG ready', pct: 0, calls: 0, status: 'idle' },
+      { id:'coder',  name:'Coder Agent',  role:'qwen3-coder:30b',  task: d.active_request?'Processing…':'Idle', pct: d.active_request?75:0, calls:d.total_requests||0, status:d.active_request?'running':'idle' },
+      { id:'worker', name:'Worker Agent', role:'qwen3-coder:30b',  task:'Standby',    pct:0,calls:0,status:'standby' },
+      { id:'voice',  name:'Voice Agent',  role:'llama3.2:3b',      task:'Listening',  pct:0,calls:0,status:'warn'    },
+      { id:'vault',  name:'Vault Agent',  role:'nomic-embed-text', task:d.vault_notes?d.vault_notes+' notes — Ready':'Ready', pct:0,calls:0,status:d.vault_notes?'running':'idle' },
+      { id:'ha',     name:'HA Agent',     role:'home-assistant',   task:d.ha_connected?'Connected':'Disconnected', pct:0,calls:0,status:d.ha_connected?'running':'error' },
+      { id:'search', name:'Search Agent', role:'searxng',          task:'SearXNG ready',pct:0,calls:0,status:'running' },
+      { id:'claude', name:'Claude Agent', role:'claude-sonnet-4.6',task:d.claude_api?'Connected':'Disconnected',pct:0,calls:0,status:d.claude_api?'running':'error' },
     ];
     renderAgentGrid();
   } catch(_) {}
@@ -1856,29 +1843,23 @@ async function execConsoleCommand(cmd) {
     const d = await resp.json();
 
     if (!resp.ok) {
-      // Server returned an error status (e.g. 403 blocked, 502 SSH failure)
       appendConsoleLine('error', d.error || `HTTP ${resp.status}`);
     } else {
-      // Print stdout line-by-line
-      if (d.stdout) {
-        d.stdout.split('\n').forEach(l => {
-          if (l !== '') appendConsoleLine('info', l);
-        });
+      if (d.cwd !== undefined && d.cwd !== consoleCwd) {
+        consoleCwd = d.cwd;
+        const shortCwd = consoleCwd.replace(/^\/root/, '~');
+        document.getElementById('consolePrompt').textContent = consoleConnectedHost + ':' + shortCwd + ' $ ';
       }
-      // Print stderr in warning colour
-      if (d.stderr) {
-        d.stderr.split('\n').filter(l => l !== '').forEach(l => appendConsoleLine('warn', l));
-      }
-      // Non-zero exit code hint
-      if (d.returncode !== 0 && d.returncode !== undefined && !d.stderr) {
+      if (d.stdout) { d.stdout.split('\n').forEach(l => { if (l) appendConsoleLine('info', l); }); }
+      if (d.stderr) { d.stderr.split('\n').filter(l=>l).forEach(l => appendConsoleLine('warn', l)); }
+      if (d.returncode !== 0 && d.returncode !== undefined && !d.stderr && !d.stdout) {
         appendConsoleLine('warn', `exit ${d.returncode}`);
       }
-      // Edge case: command produced no output at all
       if (!d.stdout && !d.stderr && d.returncode === 0) {
         appendConsoleLine('info', '(no output)');
       }
     }
-  } catch(e) {
+   } catch(e) {
     appendConsoleLine('error', `Request failed: ${e.message} — is Odin reachable?`);
   } finally {
     document.getElementById('consoleInput').focus();

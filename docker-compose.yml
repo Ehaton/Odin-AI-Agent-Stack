@@ -197,6 +197,7 @@ services:
       - GENERIC_TIMEZONE=America/Denver
       - TZ=America/Denver
       - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+      - N8N_DIAGNOSTICS_ENABLED=false
     volumes:
       - n8n_data:/home/node/.n8n
       - ./local-files:/files
