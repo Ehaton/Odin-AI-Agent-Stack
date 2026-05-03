@@ -100,6 +100,13 @@ OBSIDIAN_API_KEY = os.environ.get("OBSIDIAN_API_KEY")
 VAULT_PATH = os.environ.get("ODIN_VAULT_PATH", "")  # Path to Obsidian vault on filesystem (e.g. SMB mount)
 HASS_URL = os.environ.get("HASS_URL", "")            # e.g. http://homeassistant.local:8123
 HASS_TOKEN = os.environ.get("HASS_TOKEN", "")        # Long-lived access token from HA profile
+
+# ── Claude API (optional cloud reasoner) ──
+# Add ANTHROPIC_API_KEY to .env to enable. Leave blank for fully local operation.
+# Set a monthly spend cap at console.anthropic.com → Billing → Usage Limits.
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+# Per-call token cap (default 2048 ≈ $0.03/call on Sonnet). Controls max spend per response.
+ANTHROPIC_MAX_TOKENS = int(os.environ.get("ANTHROPIC_MAX_TOKENS", "2048"))
 WEB_PORT = int(os.environ.get("ODIN_PORT", "5050"))
 DB_PATH = os.environ.get("ODIN_DB", "odin.db")
 HOSTS_FILE = os.environ.get("ODIN_HOSTS_FILE", "hosts.json")
@@ -1078,6 +1085,96 @@ def _translate_history_to_native(messages):
     return out
 
 
+def _call_claude(model, info, messages, max_tokens, temperature, timeout):
+    """Send a request to the Anthropic Messages API.
+
+    Claude is used as a pure text reasoner — no tools forwarded.
+    Tool calls (SSH, HA, vault, web) always stay on local Ollama models.
+    Per-call tokens are capped at ANTHROPIC_MAX_TOKENS to control spend.
+    """
+    if not ANTHROPIC_API_KEY:
+        raise RuntimeError(
+            "ANTHROPIC_API_KEY not set. Add it to .env or select a local model."
+        )
+    api_model = info.get("api_model", "claude-sonnet-4-6-20250514")
+    capped_tokens = min(max_tokens, ANTHROPIC_MAX_TOKENS)
+
+    # Convert history to Anthropic format.
+    # System messages become the top-level system param.
+    # Tool role messages are skipped (Claude doesn't use them in this path).
+    anthropic_messages = []
+    system_parts = []
+    for m in messages:
+        role = m.get("role", "")
+        text = (m.get("content") or "")
+        if role == "system":
+            system_parts.append(text)
+        elif role == "user":
+            anthropic_messages.append({"role": "user", "content": text})
+        elif role == "assistant" and text:
+            anthropic_messages.append({"role": "assistant", "content": text})
+        # tool role: skipped
+
+    # Merge consecutive same-role messages
+    merged = []
+    for msg in anthropic_messages:
+        if merged and merged[-1]["role"] == msg["role"]:
+            merged[-1]["content"] += "\n\n" + msg["content"]
+        else:
+            merged.append(dict(msg))
+
+    if not merged:
+        return {"content": "", "tool_calls": [], "total_duration_ms": 0, "eval_count": 0}
+
+    # Anthropic requires the last message to be from the user
+    if merged[-1]["role"] != "user":
+        merged.append({"role": "user", "content": "Please continue."})
+
+    payload = {
+        "model": api_model,
+        "max_tokens": capped_tokens,
+        "temperature": temperature,
+        "messages": merged,
+    }
+    if system_parts:
+        payload["system"] = "\n\n".join(system_parts)
+
+    headers = {
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+
+    t0 = time.time()
+    try:
+        r = req.post("https://api.anthropic.com/v1/messages",
+                     json=payload, headers=headers, timeout=timeout)
+    except req.exceptions.Timeout:
+        raise RuntimeError(f"Claude API timed out after {timeout}s")
+    except req.exceptions.ConnectionError as e:
+        raise RuntimeError(f"Cannot reach Anthropic API: {e}")
+
+    elapsed_ms = int((time.time() - t0) * 1000)
+    if not r.ok:
+        raise RuntimeError(f"Claude API HTTP {r.status_code}: {r.text[:400]}")
+
+    data = r.json()
+    text = " ".join(
+        b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"
+    ).strip()
+    usage = data.get("usage", {})
+    logger.log("claude_api_call", model=api_model,
+               input_tokens=usage.get("input_tokens", 0),
+               output_tokens=usage.get("output_tokens", 0),
+               elapsed_ms=elapsed_ms)
+    return {
+        "content": text,
+        "tool_calls": [],
+        "total_duration_ms": elapsed_ms,
+        "eval_count": usage.get("output_tokens", 0),
+    }
+
+
 def call_llm(model, messages, tools=None, max_tokens=2048, temperature=0.7,
              timeout=180):
     """Invoke a model via Ollama's native /api/chat endpoint.
@@ -1086,6 +1183,10 @@ def call_llm(model, messages, tools=None, max_tokens=2048, temperature=0.7,
     Raises RuntimeError on HTTP failure — caller should catch.
     """
     info = MODEL_INFO.get(model, {})
+    # Route to Claude API if this model is configured with provider: anthropic
+    if info.get("provider") == "anthropic":
+        return _call_claude(model, info, messages, max_tokens, temperature, timeout)
+
     disable_thinking = info.get("disable_thinking", False)
     num_ctx = info.get("num_ctx", 8192)  # Safe default: 8K context
 

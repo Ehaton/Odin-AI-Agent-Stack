@@ -950,6 +950,7 @@ a { color: var(--accent); text-decoration: none; }
               <option value="">— select host —</option>
             </select>
             <button class="console-connect-btn" onclick="connectConsole()">Connect</button>
+            <button class="console-connect-btn" id="disconnectBtn" onclick="disconnectConsole()" style="display:none;background:var(--danger);margin-left:4px">Disconnect</button>
           </div>
           <div class="console-tabs">
             <div class="console-tab active" data-ctab="shell" onclick="switchConsoleTab('shell')">Shell</div>
@@ -1767,70 +1768,140 @@ function connectConsole() {
   const host = document.getElementById('consoleHostSelect').value;
   if (!host) { toast('Select a host first'); return; }
   consoleConnectedHost = host;
-  document.getElementById('consolePrompt').textContent = host + '$';
+  document.getElementById('consolePrompt').textContent = host + ' $ ';
+  document.getElementById('consoleInput').disabled = false;
+  document.getElementById('consoleInput').focus();
+  document.getElementById('disconnectBtn').style.display = 'inline-flex';
   switchConsoleTab('shell');
   appendConsoleLine('sys', `Connecting to ${host}…`);
-  // Ask Odin to establish the session
   api('/api/terminal/connect', { method: 'POST', body: JSON.stringify({ host }) })
-    .then(d => { appendConsoleLine('success', `Connected to ${host} (${d.host_ip || ''})`); })
-    .catch(() => {
-      // Fallback — show the host and allow command input anyway; Odin.py proxies via /api/terminal/exec
-      appendConsoleLine('warn', `Session ready (commands proxied via Odin). Type help for available commands.`);
+    .then(d => {
+      appendConsoleLine('success', `Connected — ${d.hostname || host} (${d.host_ip || ''}) as ${d.user || ''}`);
+    })
+    .catch(e => {
+      appendConsoleLine('error', `Connection failed: ${e.message}`);
+      consoleConnectedHost = null;
+      document.getElementById('consolePrompt').textContent = '$ ';
+      document.getElementById('disconnectBtn').style.display = 'none';
     });
+}
+
+function disconnectConsole() {
+  if (consoleConnectedHost) {
+    appendConsoleLine('sys', `Disconnected from ${consoleConnectedHost}`);
+  }
+  consoleConnectedHost = null;
+  document.getElementById('consolePrompt').textContent = '$ ';
+  document.getElementById('consoleInput').value = '';
+  document.getElementById('consoleInput').disabled = false;
+  document.getElementById('disconnectBtn').style.display = 'none';
 }
 
 function handleConsoleKey(e) {
   const input = document.getElementById('consoleInput');
-  if (e.key === 'ArrowUp') { if (cmdHistoryIdx < cmdHistory.length - 1) { cmdHistoryIdx++; input.value = cmdHistory[cmdHistoryIdx]; } e.preventDefault(); return; }
-  if (e.key === 'ArrowDown') { if (cmdHistoryIdx > 0) { cmdHistoryIdx--; input.value = cmdHistory[cmdHistoryIdx]; } else { cmdHistoryIdx = -1; input.value = ''; } e.preventDefault(); return; }
+  if (e.key === 'ArrowUp') {
+    if (cmdHistoryIdx < cmdHistory.length - 1) { cmdHistoryIdx++; input.value = cmdHistory[cmdHistoryIdx]; }
+    e.preventDefault(); return;
+  }
+  if (e.key === 'ArrowDown') {
+    if (cmdHistoryIdx > 0) { cmdHistoryIdx--; input.value = cmdHistory[cmdHistoryIdx]; }
+    else { cmdHistoryIdx = -1; input.value = ''; }
+    e.preventDefault(); return;
+  }
   if (e.key !== 'Enter') return;
-  const cmd = input.value.trim(); if (!cmd) return;
+  const cmd = input.value.trim();
+  if (!cmd) return;
   input.value = '';
   cmdHistory.unshift(cmd); cmdHistoryIdx = -1;
   const prompt = document.getElementById('consolePrompt').textContent;
-  appendConsoleLine('cmd', prompt + ' ' + cmd);
+  appendConsoleLine('cmd', prompt + cmd);
   execConsoleCommand(cmd);
 }
 
 async function execConsoleCommand(cmd) {
-  const lower = cmd.toLowerCase();
-  // Built-in commands
-  if (lower === 'help') {
-    ['Available commands:', '  status      — Odin system status', '  top         — top processes', '  ping <ip>   — ping a host', '  clear       — clear console', '  restart <svc> — restart a service', '  ls, pwd, df, free, uptime, ps — standard shell', '  Any other command is sent to the connected host'].forEach(l => appendConsoleLine('info', l));
+  const lower = cmd.toLowerCase().trim();
+
+  // ── Built-in client-side commands ──
+  if (lower === 'clear') {
+    document.getElementById('cpanel-shell').innerHTML = '';
     return;
   }
-  if (lower === 'clear') { document.getElementById('cpanel-shell').innerHTML = ''; return; }
-  if (!consoleConnectedHost && lower !== 'status') { appendConsoleLine('warn', 'No host connected. Select a host and click Connect.'); return; }
-  if (lower === 'status') {
-    try { const d = await api('/api/status'); appendConsoleLine('success', JSON.stringify(d).slice(0, 300)); } catch(e) { appendConsoleLine('error', 'Status error: ' + e.message); }
+  if (lower === 'exit' || lower === 'quit' || lower === 'logout') {
+    disconnectConsole();
+    return;
+  }
+  if (lower === 'help') {
+    [
+      'Built-in:  clear · exit · quit · help',
+      'Shell:     Any standard command is sent to the connected host',
+      'Examples:  ls -la  |  df -h  |  cat /etc/os-release  |  journalctl -n 20',
+      'Note:      Interactive TUI programs (vim, htop) are not supported',
+    ].forEach(l => appendConsoleLine('info', l));
+    return;
+  }
+
+  if (!consoleConnectedHost) {
+    appendConsoleLine('warn', 'No host connected — select a host and click Connect.');
     return;
   }
 
   try {
-    const d = await api('/api/terminal/exec', { method: 'POST', body: JSON.stringify({ host: consoleConnectedHost, command: cmd }) });
-    if (d.stdout) d.stdout.split('\n').forEach(l => appendConsoleLine('info', l));
-    if (d.stderr) d.stderr.split('\n').filter(l => l).forEach(l => appendConsoleLine('warn', l));
-    if (d.error) appendConsoleLine('error', d.error);
+    const input = document.getElementById('consoleInput');
+    const resp = await fetch('/api/terminal/exec', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host: consoleConnectedHost, command: cmd }),
+    });
+
+    const d = await resp.json();
+
+    if (!resp.ok) {
+      // Server returned an error status (e.g. 403 blocked, 502 SSH failure)
+      appendConsoleLine('error', d.error || `HTTP ${resp.status}`);
+    } else {
+      // Print stdout line-by-line
+      if (d.stdout) {
+        d.stdout.split('\n').forEach(l => {
+          if (l !== '') appendConsoleLine('info', l);
+        });
+      }
+      // Print stderr in warning colour
+      if (d.stderr) {
+        d.stderr.split('\n').filter(l => l !== '').forEach(l => appendConsoleLine('warn', l));
+      }
+      // Non-zero exit code hint
+      if (d.returncode !== 0 && d.returncode !== undefined && !d.stderr) {
+        appendConsoleLine('warn', `exit ${d.returncode}`);
+      }
+      // Edge case: command produced no output at all
+      if (!d.stdout && !d.stderr && d.returncode === 0) {
+        appendConsoleLine('info', '(no output)');
+      }
+    }
   } catch(e) {
-    // Fallback: route through Odin chat
-    appendConsoleLine('sys', 'Routing via Odin agent…');
-    try {
-      const r = await api('/api/chat', { method: 'POST', body: JSON.stringify({ message: 'Run on ' + consoleConnectedHost + ': ' + cmd, chat_id: activeChatId || 'console', model: 'auto' }) });
-      const out = r.response || '(no output)';
-      out.split('\n').forEach(l => appendConsoleLine('info', l));
-    } catch(e2) { appendConsoleLine('error', 'Command failed: ' + e2.message); }
+    appendConsoleLine('error', `Request failed: ${e.message} — is Odin reachable?`);
+  } finally {
+    document.getElementById('consoleInput').focus();
   }
 }
 
 function appendConsoleLine(type, text) {
   const panel = document.getElementById('cpanel-shell');
-  const line = document.createElement('div'); line.className = 'log-line ' + type;
-  line.textContent = text; panel.appendChild(line);
+  const line = document.createElement('div');
+  line.className = 'log-line ' + type;
+  line.textContent = text;
+  panel.appendChild(line);
+  // Auto-scroll to bottom of the console body
+  const body = document.getElementById('consoleBody');
   panel.scrollTop = panel.scrollHeight;
-  // Also log errors to errors tab
+  body.scrollTop = body.scrollHeight;
+  // Mirror errors to the errors tab
   if (type === 'error') {
     const errPanel = document.getElementById('cpanel-errors');
-    const el = document.createElement('div'); el.className = 'log-line error'; el.textContent = new Date().toLocaleTimeString() + ' ' + text; errPanel.appendChild(el);
+    const el = document.createElement('div');
+    el.className = 'log-line error';
+    el.textContent = new Date().toLocaleTimeString() + '  ' + text;
+    errPanel.appendChild(el);
   }
 }
 
