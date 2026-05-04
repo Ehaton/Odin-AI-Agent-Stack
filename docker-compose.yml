@@ -36,8 +36,6 @@ services:
       --model medium
       --language en
       --device cpu
-    # Whisper runs on CPU (medium model) to free full 24GB VRAM for
-    # qwen3.6:27b. Upgrade to large-v3 + cuda if adding a second GPU.
 
   piper:
     image: rhasspy/wyoming-piper:latest
@@ -64,43 +62,6 @@ services:
       --preload-model hey_odin
       --threshold 0.5
 
-  open-webui:
-    image: ghcr.io/open-webui/open-webui:main
-    container_name: open-webui
-    restart: unless-stopped
-    networks:
-      - ai-net
-    ports:
-      - "3000:8080"
-    environment:
-      - OLLAMA_BASE_URL=http://ollama:11434
-      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-change-this-to-something-random}
-      - ENABLE_IMAGE_GENERATION=True
-      - IMAGE_GENERATION_ENGINE=comfyui
-      - COMFYUI_BASE_URL=http://comfyui:8188
-      - ENABLE_RAG_WEB_SEARCH=True
-      - RAG_WEB_SEARCH_ENGINE=searxng
-      - SEARXNG_QUERY_URL=http://searxng:8080/search?q=<query>
-      - AUDIO_STT_ENGINE=whisper
-      - WHISPER_MODEL=medium
-      - AUDIO_TTS_ENGINE=openai
-      - AUDIO_TTS_OPENAI_API_BASE_URL=http://piper:10200
-      - AUDIO_TTS_OPENAI_API_KEY=unused
-      - VECTOR_DB=chroma
-      - CHROMA_HTTP_HOST=chromadb
-      - CHROMA_HTTP_PORT=8000
-    volumes:
-      - open-webui-data:/app/backend/data
-    depends_on:
-      - ollama
-      - comfyui
-      - searxng
-      - chromadb
-    deploy:
-      resources:
-        limits:
-          memory: 4G
-
   comfyui:
     image: pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime
     container_name: comfyui
@@ -110,17 +71,21 @@ services:
     ports:
       - "8188:8188"
     volumes:
-      - comfyui-data:/workspace
-    working_dir: /workspace
-    entrypoint: /bin/bash
+      - comfyui-models:/app/ComfyUI/models
+      - comfyui-output:/app/ComfyUI/output
+      - comfyui-custom-nodes:/app/ComfyUI/custom_nodes
+    entrypoint: bash
     command: >
       -c "
-      if [ ! -d /workspace/ComfyUI ]; then
-        apt-get update && apt-get install -y git;
-        git clone https://github.com/comfyanonymous/ComfyUI.git /workspace/ComfyUI;
-        pip install -r /workspace/ComfyUI/requirements.txt;
-      fi;
-      cd /workspace/ComfyUI && python main.py --listen 0.0.0.0 --port 8188
+      if [ ! -f /opt/ComfyUI/main.py ]; then
+        apt-get update -qq && apt-get install -y -qq git &&
+        git clone --depth 1 https://github.com/comfyanonymous/ComfyUI /opt/ComfyUI &&
+        pip install -q -r /opt/ComfyUI/requirements.txt;
+      fi &&
+      ln -sfn /app/ComfyUI/models /opt/ComfyUI/models &&
+      ln -sfn /app/ComfyUI/output /opt/ComfyUI/output &&
+      ln -sfn /app/ComfyUI/custom_nodes /opt/ComfyUI/custom_nodes &&
+      python /opt/ComfyUI/main.py --listen 0.0.0.0 --port 8188
       "
     deploy:
       resources:
@@ -129,6 +94,12 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8188/system_stats"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 300s
     logging:
       driver: "json-file"
       options:
@@ -187,7 +158,7 @@ services:
     networks:
       - ai-net
     ports:
-      - "5678:5678"
+      - "5679:5678"
     environment:
       - N8N_PORT=5678
       - N8N_PROTOCOL=${N8N_PROTOCOL}
@@ -211,13 +182,21 @@ volumes:
   ollama-data:
   whisper-data:
   piper-data:
-  open-webui-data:
   searxng-data:
   chromadb-data:
-  comfyui-data:
+  comfyui-models:
+    name: odin_comfyui-models
+    external: true
+  comfyui-output:
+    name: odin_comfyui-output
+    external: true
+  comfyui-custom-nodes:
+    name: odin_comfyui-custom-nodes
+    external: true
   odin-db:
   odin-logs:
   odin-images:
   n8n_data:
+
 networks:
   ai-net:

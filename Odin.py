@@ -153,9 +153,13 @@ def _resolve_host_ip(info: dict) -> str:
 
 DANGEROUS_PATTERNS = [
     r"\brm\b", r"\brmdir\b", r"\bdel\b", r"\breboot\b", r"\bshutdown\b", r"\bpoweroff\b",
-    r"\bsystemctl\s+(stop|disable|mask)", r"\bdocker\s+(rm|stop|kill|prune|restart)",
+    r"\bsystemctl\s+(stop|disable|mask|restart networking)", r"\bdocker\s+(rm|stop|kill|prune|restart)",
     r"\bqm\s+(stop|destroy|shutdown)", r"\bpct\s+(stop|destroy|shutdown)",
     r"\bmkfs\b", r"\bfdisk\b", r"\bdd\b", r"\buserdel\b",
+    # Network-modifying — added after ARP table incident
+    r"\bip\s+neigh\s+(flush|del)", r"\bip\s+link\s+set\b", r"\bip\s+route\s+del\b",
+    r"\biptables\s+-F\b", r"\bnft\s+flush\b",
+    r"\bsystemctl\s+restart\s+(networking|network|NetworkManager|systemd-networkd)\b",
 ]
 
 def is_dangerous(cmd):
@@ -1665,14 +1669,14 @@ def process_message(user_input, chat_id, model_override=None, attachments=None):
         iter_tools = tools if (tools and supports_tools and not is_final_iter) else None
 
         try:
-            t_llm = time.time()
+            model_meta = MODEL_INFO.get(model, {})
             resp = call_llm(
                 model=model,
                 messages=iter_messages,
                 tools=iter_tools,
-                max_tokens=2048,
-                temperature=0.7,
-                timeout=180,
+                max_tokens=model_meta.get("num_ctx", 8192) // 4,  # 25% of ctx for output
+                temperature=model_meta.get("temperature", 0.7),
+                timeout=model_meta.get("timeout", 180),
             )
             llm_elapsed_ms = int((time.time() - t_llm) * 1000)
             logger.log("llm_call", chat_id=chat_id, model=model,
@@ -2224,6 +2228,12 @@ def terminal_exec():
         "passwd", "userdel", "usermod",
         "chmod -R 777 /", "chown -R",
         "iptables -F", "ufw disable",
+        "systemctl restart networking",
+        "systemctl stop networking", 
+        "ip neigh flush",
+        "ip neigh del",
+        "ip link set",
+        "ip route del",
     ]
     lower_cmd = command.lower()
     for blocked in BLOCKED_PATTERNS:
@@ -2448,7 +2458,9 @@ def main():
     print(f"  🔑 SSH hosts: {len(SSH_HOSTS)}")
     print(f"  🌐 Web access: enabled")
     if ANTHROPIC_API_KEY:
-        print(f"  ☁️  Claude API: enabled (model: claude-sonnet-4-6-20250514, cap: {ANTHROPIC_MAX_TOKENS} tokens/call)")
+        claude_info = next((v for v in MODEL_INFO.values() if v.get("provider") == "anthropic"), {})
+        claude_model_str = claude_info.get("api_model", "claude-sonnet-4-6")
+        print(f"  ☁️  Claude API: enabled (model: {claude_model_str}, cap: {ANTHROPIC_MAX_TOKENS} tokens/call)")
     else:
         print(f"  ☁️  Claude API: not configured (add ANTHROPIC_API_KEY to .env to enable)")
     print()
