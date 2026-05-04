@@ -14,20 +14,21 @@ search:
   default_lang: "en"
   formats:
     - html
-    - json   # REQUIRED for Odin API access
+    - json
   max_page: 0
+  # Raise timeout slightly — some engines are slow but worth waiting for
+  timeout_limit: 5.0
+  max_request_timeout: 12.0
 
 server:
-  # CRITICAL: regenerate this with `openssl rand -hex 32` before first start
   secret_key: "REGENERATE_ME_WITH_openssl_rand_hex_32"
   limiter: false
   public_instance: false
   image_proxy: true
-  http_protocol_version: "1.0"
-  method: "POST"
+  http_protocol_version: "1.1"
+  method: "GET"
   default_http_headers:
     X-Content-Type-Options: nosniff
-    X-Download-Options: noopen
     X-Robots-Tag: noindex, nofollow
     Referrer-Policy: no-referrer
 
@@ -37,10 +38,8 @@ ui:
   query_in_title: false
   infinite_scroll: false
   center_alignment: false
+  default_theme: simple
 
-# Engines — curated for agent use. Wikipedia and DuckDuckGo are the most
-# reliable for structured agent queries. Google/Bing/Brave provide volume
-# and recency. Remove or add engines as needed.
 engines:
   - name: google
     engine: google
@@ -85,9 +84,31 @@ engines:
     shortcut: al
     disabled: false
 
+  # News category engines
+  - name: bing news
+    engine: bing_news
+    shortcut: bng
+    disabled: false
+
+  - name: google news
+    engine: google_news
+    shortcut: gn
+    disabled: false
+
+  # IT / tech category engines
+  - name: hackernews
+    engine: hackernews
+    shortcut: hn
+    disabled: false
+
+  - name: reddit
+    engine: reddit
+    shortcut: re
+    disabled: false
+
 outgoing:
-  request_timeout: 3.5
-  max_request_timeout: 10.0
+  request_timeout: 5.0
+  max_request_timeout: 12.0
   useragent_suffix: ""
   pool_connections: 100
   pool_maxsize: 20

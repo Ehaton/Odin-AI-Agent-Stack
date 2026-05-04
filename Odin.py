@@ -933,6 +933,28 @@ def get_tools(vault, scope="worker"):
                 "RETURNS: {date, time, day}."
             ),
             "parameters": {"type": "object", "properties": {}}}},
+        {"type": "function", "function": {
+            "name": "image_gen",
+            "description": (
+                "Generate an image from a text prompt using ComfyUI and Flux/SDXL models. "
+                "USE FOR: any request to create, generate, draw, or render an image. "
+                "Style options: default, photorealistic, portrait, landscape, cinematic, "
+                "concept_art, abstract, fast, sketch, fantasy, dnd, artistic, oil_painting, "
+                "photo, architecture. "
+                "RETURNS: {path, filename, prompt, style, model, seed, width, height}."
+            ),
+            "parameters": {"type": "object",
+                           "properties": {
+                               "prompt": {"type": "string",
+                                          "description": "Detailed image description. Be specific about subject, lighting, style, mood."},
+                               "style":  {"type": "string",
+                                          "description": "Style preset controlling which model and sampler are used.",
+                                          "enum": ["default","photorealistic","portrait","landscape","cinematic","concept_art","abstract","fast","sketch","fantasy","dnd","artistic","oil_painting","photo","architecture"]},
+                               "width":  {"type": "integer", "description": "Width in pixels, multiple of 64 (default 1024, max 2048)."},
+                               "height": {"type": "integer", "description": "Height in pixels, multiple of 64 (default 1024, max 2048)."},
+                               "seed":   {"type": "integer", "description": "Random seed (0 = random)."},
+                           },
+                           "required": ["prompt"]}}},
     ])
     return tools
 
@@ -953,22 +975,37 @@ def handle_tool(name, args, vault, shell, web):
     elif name == "web_fetch": return json.dumps(web.fetch(args.get("url","")))
     elif name == "web_search":
         query = args.get("query", "").strip()
-        max_results = min(int(args.get("max_results", 5)), 10)
-        searxng_url = os.environ.get("SEARXNG_URL", "http://searxng:8080").rstrip("/")
-        try:
-            r = req.get(f"{searxng_url}/search", params={
-                "q": query, "format": "json", "categories": "general",
-                "language": "en", "safesearch": 0,
-            }, timeout=15, headers={"User-Agent": "Odin-Agent/1.0"})
-            r.raise_for_status()
-            results = r.json().get("results", [])[:max_results]
-            normalized = [{"title": x.get("title","").strip(),
-                           "url": x.get("url","").strip(),
-                           "snippet": x.get("content","").strip()[:300]}
-                          for x in results]
-            return json.dumps({"results": normalized, "query": query})
-        except Exception as e:
-            return json.dumps({"error": f"Web search failed: {e}"})
+        max_results = min(int(args.get("max_results", 5)), 15)
+        primary_url = os.environ.get("SEARXNG_URL", "http://localhost:8080").rstrip("/")
+        fallback_url = "http://searxng:8080"
+        payload = None
+        last_error = None
+        for searxng_url in [primary_url, fallback_url]:
+            try:
+                r = req.get(f"{searxng_url}/search", params={
+                    "q": query, "format": "json", "categories": "general",
+                    "language": "en", "safesearch": 0,
+                }, timeout=15, headers={"User-Agent": "Odin-Agent/1.0"})
+                r.raise_for_status()
+                payload = r.json()
+                break
+            except Exception as e:
+                last_error = str(e)
+        if payload is None:
+            return json.dumps({"error": f"Web search failed: {last_error}"})
+        seen_urls = set()
+        normalized = []
+        for x in payload.get("results", []):
+            url = x.get("url", "").strip()
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+            normalized.append({"title": x.get("title","").strip(),
+                               "url": url,
+                               "snippet": x.get("content","").strip()[:400]})
+            if len(normalized) >= max_results:
+                break
+        return json.dumps({"results": normalized, "query": query})
     elif name == "get_public_ip": return json.dumps({"public_ip": web.public_ip()})
     elif name == "get_current_datetime":
         now = datetime.datetime.now()
@@ -998,6 +1035,32 @@ def handle_tool(name, args, vault, shell, web):
         return json.dumps(ha.list_entities(args.get("domain")))
     elif name == "ha_get_state":
         return json.dumps(ha.get_state(args.get("entity_id","")))
+    elif name == "image_gen":
+        try:
+            from tools.image_gen import ImageGenTool
+            tool = ImageGenTool()
+            result = tool.execute(
+                prompt=args.get("prompt", ""),
+                style=args.get("style", "default"),
+                width=int(args.get("width", 1024)),
+                height=int(args.get("height", 1024)),
+                seed=int(args.get("seed", 0)),
+            )
+            if result.ok:
+                data = result.data
+                return json.dumps({
+                    "ok": True,
+                    "path": data.get("path"),
+                    "filename": data.get("filename"),
+                    "style": data.get("style"),
+                    "model": data.get("model"),
+                    "seed": data.get("seed"),
+                    "message": f"Image generated and saved to {data.get('path')}",
+                })
+            else:
+                return json.dumps({"ok": False, "error": result.error})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": f"image_gen failed: {e}"})
     return json.dumps({"error": f"Unknown tool: {name}"})
 
 
@@ -1100,7 +1163,7 @@ def _call_claude(model, info, messages, max_tokens, temperature, timeout):
         raise RuntimeError(
             "ANTHROPIC_API_KEY not set. Add it to .env or select a local model."
         )
-    api_model = info.get("api_model", "claude-sonnet-4-6-20250514")
+    api_model = info.get("api_model", "claude-sonnet-4-6")
     capped_tokens = min(max_tokens, ANTHROPIC_MAX_TOKENS)
 
     # Convert history to Anthropic format.
@@ -1281,17 +1344,16 @@ def classify(text):
     """Route a query to a category. Returns one of CATEGORIES keys.
 
     Heuristic-only — no LLM call. Routing priority:
-      1. Voice/HA intent        → llama3.2:3b with HA tools
-      2. Code or simple infra   → qwen3:4b (has tools, fast, no thinking)
-      3. Complex multi-host     → gemma4:26b (full tools, full power)
-      4. Reasoning/synthesis    → gemma4:26b
+      1. Voice/HA intent        → llama3.2:3b with HA tools only
+      2. Code or simple infra   → qwen3-coder:30b (tools, fast, no thinking)
+      3. Complex multi-host     → qwen3.6:35b-a3b (full tools, reasoning)
+      4. Reasoning/synthesis    → qwen3.6:35b-a3b
       5. Trivial chat           → llama3.2:3b
-      6. Default                → gemma4:26b (safe fallback for ambiguous queries)
+      6. Default                → qwen3.6:35b-a3b (safe fallback for ambiguous queries)
 
-    Key change from earlier versions: qwen3:4b supports tool calling natively,
-    so "code + infra" hybrid queries (like "debug my python script on
-    ai-stack-420") can now stay on the small model instead of falling back
-    to Gemma. Only genuinely complex queries escalate to Gemma.
+    qwen3-coder:30b handles all tool-calling work (SSH, code, infra, HA).
+    qwen3.6:35b-a3b handles conversational reasoning, planning, synthesis.
+    Both are MoE models — only one loads into VRAM at a time.
     """
     if not text:
         return "general"
@@ -1317,7 +1379,7 @@ def classify(text):
     if word_count <= _ROUTING["voice_max_words"] and has_ha_verb and has_ha_noun:
         return "voice"
 
-    # ─── 2. Code or simple infra (qwen3:4b handles both) ─────────────
+    # ─── 2. Code or simple infra (qwen3-coder:30b handles both) ──────
     code_keywords = (
         "python", "javascript", "typescript", "bash", "shell script",
         "function", "class", "method", "variable", "loop", "if statement",
@@ -1354,7 +1416,7 @@ def classify(text):
 
     # ─── 3. Simple infra without code keywords ───────────────────────
     # Short, single-host queries like "check uptime on ai-stack-420" can
-    # run on qwen3:4b too — it has tool calling and is much faster.
+    # run on qwen3-coder:30b — it has tool calling and is much faster.
     simple_infra_verbs = (
         "check ", "show ", "get ", "list ", "what is the", "what's the",
         "is ", "are ", "how much ", "how many ",
@@ -1363,7 +1425,7 @@ def classify(text):
                            for v in simple_infra_verbs)
     if (word_count <= 15 and host_mentions <= 1 and has_simple_verb
             and not has_complex):
-        return "infra_simple"  # → qwen3:4b via CATEGORIES mapping
+        return "infra_simple"  # → qwen3-coder:30b via CATEGORIES mapping
 
     # ─── 4. Trivial chat ────────────────────────────────────────────
     trivial_exact = (
@@ -1373,7 +1435,7 @@ def classify(text):
     if lower in trivial_exact or lower.rstrip("?.!") in trivial_exact:
         return "trivial"
 
-    # ─── 5. Everything else → Gemma 4 ───────────────────────────────
+    # ─── 5. Everything else → qwen3.6:35b-a3b ──────────────────────
     # Reasoning, multi-host coordination, vault synthesis, vision — all
     # go to the primary worker. We still compute sub-categories for logging.
     scores = {
@@ -1670,6 +1732,7 @@ def process_message(user_input, chat_id, model_override=None, attachments=None):
 
         try:
             model_meta = MODEL_INFO.get(model, {})
+            t_llm = time.time()
             resp = call_llm(
                 model=model,
                 messages=iter_messages,
@@ -2085,11 +2148,22 @@ def upload():
 
 @app.route("/api/status")
 def status():
+    vault_notes = None
+    if vault and vault.connected:
+        try:
+            vault_notes = sum(1 for _ in vault.root.rglob("*.md")) if hasattr(vault, "root") else None
+        except Exception:
+            pass
     return jsonify({
         "ollama": OLLAMA_HOST,
         "vault": vault.connected if vault else False,
+        "vault_notes": vault_notes,
+        "ha_connected": ha.connected if ha else False,
         "ssh_hosts": list(SSH_HOSTS.keys()),
         "models": list(MODELS.values()),
+        "active_request": False,
+        "claude_api": bool(ANTHROPIC_API_KEY),
+        "total_requests": 0,
     })
 
 @app.route("/api/hosts")

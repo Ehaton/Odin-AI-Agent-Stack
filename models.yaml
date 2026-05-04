@@ -51,11 +51,11 @@ models:
     supports_vision:  false
     disable_thinking: false
     num_ctx:          32768
-    temperature:      0.65
+    temperature:      0.8
     prewarm:          false
     keep_alive:       10m
     role_hints:       [worker, reasoning, general, conversation]
-    timeout:          180
+    timeout:          360
 
   llama3.2:3b:
     label: "Llama 3.2 3B"

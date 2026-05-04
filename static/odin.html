@@ -1680,13 +1680,13 @@ async function loadAgentStatus() {
     // Build agent data from Ollama model status
     const models = d.models_loaded || [];
     agentData = [
-      { id:'coder',  name:'Coder Agent',  role:'qwen3-coder:30b',  task: d.active_request?'Processing…':'Idle', pct: d.active_request?75:0, calls:d.total_requests||0, status:d.active_request?'running':'idle' },
-      { id:'worker', name:'Worker Agent', role:'qwen3-coder:30b',  task:'Standby',    pct:0,calls:0,status:'standby' },
-      { id:'voice',  name:'Voice Agent',  role:'llama3.2:3b',      task:'Listening',  pct:0,calls:0,status:'warn'    },
-      { id:'vault',  name:'Vault Agent',  role:'nomic-embed-text', task:d.vault_notes?d.vault_notes+' notes — Ready':'Ready', pct:0,calls:0,status:d.vault_notes?'running':'idle' },
-      { id:'ha',     name:'HA Agent',     role:'home-assistant',   task:d.ha_connected?'Connected':'Disconnected', pct:0,calls:0,status:d.ha_connected?'running':'error' },
-      { id:'search', name:'Search Agent', role:'searxng',          task:'SearXNG ready',pct:0,calls:0,status:'running' },
-      { id:'claude', name:'Claude Agent', role:'claude-sonnet-4.6',task:d.claude_api?'Connected':'Disconnected',pct:0,calls:0,status:d.claude_api?'running':'error' },
+      { id:'coder',  name:'Coder Agent',  role:'qwen3-coder:30b',    task: d.active_request?'Processing…':'Idle', pct: d.active_request?75:0, calls:d.total_requests||0, status:d.active_request?'running':'idle' },
+      { id:'worker', name:'Worker Agent', role:'qwen3.6:35b-a3b',    task:'Standby',    pct:0,calls:0,status:'standby' },
+      { id:'voice',  name:'Voice Agent',  role:'llama3.2:3b',        task:'Listening',  pct:0,calls:0,status:'warn'    },
+      { id:'vault',  name:'Vault Agent',  role:'nomic-embed-text',   task:d.vault_notes?d.vault_notes+' notes — Ready':'Ready', pct:0,calls:0,status:d.vault_notes?'running':'idle' },
+      { id:'ha',     name:'HA Agent',     role:'home-assistant',     task:d.ha_connected?'Connected':'Disconnected', pct:0,calls:0,status:d.ha_connected?'running':'error' },
+      { id:'search', name:'Search Agent', role:'searxng',            task:'SearXNG ready',pct:0,calls:0,status:'running' },
+      { id:'claude', name:'Claude Agent', role:'claude-sonnet-4-6',  task:d.claude_api?'Connected':'Disconnected',pct:0,calls:0,status:d.claude_api?'running':'error' },
     ];
     renderAgentGrid();
   } catch(_) {}
