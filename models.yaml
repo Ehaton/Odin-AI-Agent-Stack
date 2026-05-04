@@ -2,74 +2,64 @@
 # Odin Model Registry — BeanLab May 2026
 # ============================================================================
 
-# ── Routing thresholds ───────────────────────────────────────────────────────
 routing:
   voice_max_words:        12
   simple_infra_max_words: 15
   complex_host_threshold:  3
   complex_word_threshold:  60
 
-# ── Role → model mapping ─────────────────────────────────────────────────────
 roles:
-  worker:  qwen3.6:35b-a3b   # conversation, reasoning, general — NEW
-  coder:   qwen3-coder:30b   # all tool-calling: SSH, code, infra, HA
-  voice:   llama3.2:3b       # always warm, voice + trivial
-  vision:  qwen3-coder:30b   # fallback until a VL model fits
+  worker:  qwen3.6:35b-a3b
+  coder:   qwen3-coder:30b
+  voice:   llama3.2:3b
+  vision:  qwen3-coder:30b
 
-# ── Category → role mapping ──────────────────────────────────────────────────
 categories:
   code:         coder
   infra_simple: coder
-  infra:        coder        # keep infra on the tool-calling model
-  reasoning:    worker       # now goes to the conversational reasoner
+  infra:        coder
+  reasoning:    worker
   home:         worker
   voice:        voice
   vision:       vision
   trivial:      voice
-  general:      worker       # conversation goes to the better model
+  general:      worker
 
-# ── Model definitions ────────────────────────────────────────────────────────
 models:
 
-  # ── Primary coder / tool-caller ─────────────────────────────────────────
   qwen3-coder:30b:
     label: "Qwen3 Coder 30B"
     description: >
       MoE: 30B total, ~3.3B active. Primary tool-calling model for all
       SSH, code generation, infra tasks, and HA service calls.
-      Non-thinking mode for speed.
     supports_tools:   true
     supports_vision:  false
     disable_thinking: true
     num_ctx:          16384
-    temperature:      0.3      # deterministic — correct for code
+    temperature:      0.3
     prewarm:          true
     keep_alive:       10m
     role_hints:       [coder, infra, tools]
     timeout:          180
 
-  # ── Conversational reasoner ──────────────────────────────────────────────
   qwen3.6:35b-a3b:
     label: "Qwen3.6 35B"
     description: >
-      MoE: 35B total, ~3B active. 101 tok/s on RTX 3090. Released April 2026.
-      Strong conversational reasoning, planning, and synthesis. Higher temp
-      for natural dialogue. Swaps in for general/reasoning categories.
+      MoE: 35B total, ~3B active. Conversational reasoning, planning,
+      and synthesis. Swaps in for general/reasoning categories.
     supports_tools:   true
     supports_vision:  false
-    disable_thinking: false    # let it think for reasoning tasks
-    num_ctx:          32768    # larger context — 262K supported, 32K practical
-    temperature:      0.65     # warmer for conversation
-    prewarm:          false    # don't load both 30B models at once
+    disable_thinking: false
+    num_ctx:          32768
+    temperature:      0.65
+    prewarm:          false
     keep_alive:       10m
     role_hints:       [worker, reasoning, general, conversation]
     timeout:          180
 
-  # ── Voice / lightweight ──────────────────────────────────────────────────
   llama3.2:3b:
     label: "Llama 3.2 3B"
-    description: >
-      Always-warm voice model. Sub-2s HA intent routing.
+    description: Always-warm voice model. Sub-2s HA intent routing.
     supports_tools:   true
     supports_vision:  false
     disable_thinking: false
@@ -80,7 +70,6 @@ models:
     role_hints:       [voice, trivial]
     timeout:          60
 
-  # ── Embeddings ───────────────────────────────────────────────────────────
   nomic-embed-text:
     label: "Nomic Embed Text"
     description: Vault semantic search via ChromaDB. Not used for chat.
@@ -94,12 +83,11 @@ models:
     role_hints:       [embed]
     timeout:          30
 
-  # ── Claude Sonnet 4.6 ────────────────────────────────────────────────────
   claude-sonnet:
     label: "Claude Sonnet 4.6"
     description: >
-      Anthropic cloud. Architecture design, cross-file reasoning, long-form
-      writing. No tools — pure text reasoning only.
+      Anthropic cloud. Architecture design, cross-file reasoning,
+      long-form writing. No tools — pure text reasoning only.
     supports_tools:   false
     supports_vision:  false
     disable_thinking: false
