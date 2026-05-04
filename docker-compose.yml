@@ -58,42 +58,6 @@ services:
       --preload-model hey_odin
       --threshold 0.5
 
-  comfyui:
-    image: pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime
-    container_name: comfyui
-    restart: unless-stopped
-    networks:
-      - ai-net
-    ports:
-      - "8188:8188"
-    volumes:
-      - comfyui-models:/app/ComfyUI/models
-      - comfyui-output:/app/ComfyUI/output
-      - comfyui-custom-nodes:/app/ComfyUI/custom_nodes
-    environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-    runtime: nvidia
-    entrypoint: bash
-    command: >
-      -c "
-      if [ ! -f /opt/ComfyUI/main.py ]; then
-        apt-get update -qq && apt-get install -y -qq git &&
-        git clone --depth 1 https://github.com/comfyanonymous/ComfyUI /opt/ComfyUI &&
-        pip install -q -r /opt/ComfyUI/requirements.txt;
-      fi &&
-      ln -sfn /app/ComfyUI/models /opt/ComfyUI/models &&
-      ln -sfn /app/ComfyUI/output /opt/ComfyUI/output &&
-      ln -sfn /app/ComfyUI/custom_nodes /opt/ComfyUI/custom_nodes &&
-      python /opt/ComfyUI/main.py --listen 0.0.0.0 --port 8188
-      "
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8188/system_stats"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 300s
-
   searxng:
     image: docker.io/searxng/searxng:latest
     container_name: searxng
